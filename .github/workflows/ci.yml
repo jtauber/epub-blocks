@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run pyright
+      - run: uv run coverage run -m unittest discover -s tests
+      - run: uv run coverage report
+      - run: uv run pyright --verifytypes epub_blocks --ignoreexternal
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python -m build
+      - run: uv run twine check dist/*
+      - name: Inspect artifacts
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tarfile
+          import zipfile
+
+          source = next(pathlib.Path("dist").glob("*.tar.gz"))
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with tarfile.open(source) as archive:
+              names = archive.getnames()
+              assert any(name.endswith("/docs/recipe-format.md") for name in names)
+              assert any(name.endswith("/schemas/recipe-v1.schema.json") for name in names)
+          with zipfile.ZipFile(wheel) as archive:
+              assert "epub_blocks/py.typed" in archive.namelist()
+          PY
+      - name: Test the built wheel
+        run: |
+          uv venv --python 3.13 .wheel-venv
+          uv pip install --python .wheel-venv/bin/python dist/*.whl
+          .wheel-venv/bin/epub-blocks --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/

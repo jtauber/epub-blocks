@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "epub-blocks"
+version = "0.1.0"
+description = "Recipe-driven extraction of structured text blocks from EPUB files"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+authors = [
+  {name = "James Tauber"},
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+  "Topic :: Text Processing",
+]
+keywords = ["epub", "text extraction", "digital humanities"]
+dependencies = []
+
+[project.urls]
+Documentation = "https://github.com/jtauber/epub-blocks#readme"
+Issues = "https://github.com/jtauber/epub-blocks/issues"
+Repository = "https://github.com/jtauber/epub-blocks"
+
+[project.scripts]
+epub-blocks = "epub_blocks.cli:main"
+
+[dependency-groups]
+dev = [
+  "build>=1.3.0",
+  "coverage>=7.16.0",
+  "pyright>=1.1.411",
+  "ruff>=0.9",
+  "twine>=6.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+epub_blocks = ["py.typed"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[tool.coverage.run]
+branch = true
+source = ["epub_blocks"]
+
+[tool.coverage.report]
+fail_under = 90
+precision = 1
+show_missing = true
