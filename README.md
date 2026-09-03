@@ -12,10 +12,10 @@ evolve before 1.0.
 
 ## Installation
 
-Install the 0.1.0 release directly from GitHub:
+Install the current release from PyPI:
 
 ```bash
-python -m pip install "git+https://github.com/jtauber/epub-blocks.git@v0.1.0"
+python -m pip install epub-blocks
 ```
 
 For development, install from a local checkout:
