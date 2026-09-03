@@ -15,8 +15,8 @@ jobs:
       matrix:
         python-version: ["3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -30,8 +30,8 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.13"
           enable-cache: true
@@ -59,7 +59,7 @@ jobs:
           uv venv --python 3.13 .wheel-venv
           uv pip install --python .wheel-venv/bin/python dist/*.whl
           .wheel-venv/bin/epub-blocks --version
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: distributions
           path: dist/
