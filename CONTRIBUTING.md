@@ -31,8 +31,13 @@ New behavior and bug fixes should include tests. Tests create conforming EPUB
 fixtures in temporary directories; do not commit copyrighted EPUB files.
 
 Please open an issue before proposing an incompatible recipe-format or public
-API change. Recipe readers intentionally reject unknown fields, so an
-incompatible semantic change needs a new recipe version.
+API change. During the current pre-1.0 phase, with no known external recipe
+users, an agreed incompatible change may retain `recipe_version: "1"`.
+The 0.3.0 redesign follows this policy: existing recipes must be regenerated,
+and the changelog records the break. Recipe authors should pin the package
+version as well as the source EPUB. Once external users depend on the format,
+incompatible changes will require an explicit format-version and migration
+decision.
 
 See the
 [release checklist](https://github.com/jtauber/epub-blocks/blob/main/docs/releasing.md)

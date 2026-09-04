@@ -1,30 +1,29 @@
 # Recipe format
 
-This document specifies `epub-blocks` recipe version 1. A recipe maps the
-ordered source blocks of one pinned EPUB to an ordered, structural canonical
-reference index. The result is a sequence of `id`, `type`, and `text` records.
+This document specifies `epub-blocks` recipe version 1 as implemented by
+epub-blocks 0.3.0. A recipe is a self-contained structural program that turns
+one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
-The reference index contains no text, text hashes, or text lengths. Mapping is
-therefore structural and deterministic; it never chooses a source span by
-comparing it with an expected reading.
+The recipe generates its output identifiers and types. It does not refer to a
+pre-existing output table, expected reading, text hash, or character count.
+Such material can be used outside epub-blocks to test or review a recipe, but
+it is not a runtime input.
 
 ## Top-level object
 
-A recipe is a UTF-8 JSON object with these members:
-
 | Member | Required | Meaning |
 | --- | --- | --- |
-| `recipe_version` | yes | Must be the string `"1"`. |
-| `metadata` | no | Opaque object ignored by `epub-blocks`. |
+| `recipe_version` | yes | The string `"1"`. |
+| `metadata` | no | Opaque object ignored by epub-blocks. |
 | `epub` | yes | Pins the source publication. |
-| `references` | yes | Pins the ordered canonical reference index. |
 | `normalization` | no | Controls text normalization. |
 | `omit_epub_types` | no | Removes descendants with listed EPUB semantic types. |
 | `source_blocks` | yes | Selects candidate source blocks. |
-| `mapping` | yes | Maps candidates to references. |
+| `output` | yes | Defines groups, identifiers, types, and exceptions. |
 
-Unknown members and duplicate JSON member names are errors. `NaN`, `Infinity`,
-and `-Infinity` are not accepted JSON values.
+Unknown members, duplicate JSON members, `NaN`, and infinities are errors.
+Optional members receive their defaults only when absent; explicit `null`
+values are invalid outside opaque `metadata`.
 
 ## EPUB pin
 
@@ -35,33 +34,9 @@ and `-Infinity` are not accepted JSON values.
 }
 ```
 
-Both members are required. `identifier` must equal one of the package
-metadata's nonempty `dc:identifier` values. `sha256` is 64 lowercase hexadecimal
-characters and must match the complete EPUB file.
-
-## Canonical reference index
-
-```json
-"references": {
-  "path": "references.tsv",
-  "sha256": "5c0c7f91488d7a31fe599ad950162523292e8865cb946d3698ce2a477227d08c",
-  "columns": {
-    "id": "id",
-    "type": "type"
-  }
-}
-```
-
-The path is absolute or relative to the JSON recipe. Programmatic calls using a
-relative path must supply `base_dir`. The hash pins the complete TSV bytes.
-
-The UTF-8 TSV must have exactly two uniquely named columns. By default they are
-`id` and `type`; `columns` may assign different names. Every data row must have
-exactly two fields, both nonempty. IDs must be unique. Row order is output
-order. An empty index is invalid.
-
-This file defines only a reference sequence and type sequence. A file with
-fingerprint or text columns is not a version 1 reference index.
+Both values are required. `identifier` must equal one of the nonempty
+`dc:identifier` values in the package metadata. `sha256` is the lowercase
+SHA-256 of the complete EPUB file.
 
 ## Normalization
 
@@ -73,162 +48,266 @@ fingerprint or text columns is not a version 1 reference index.
 }
 ```
 
-All members are optional. Defaults are shown above. Unicode normalization may
-be `NFC`, `NFD`, `NFKC`, `NFKD`, or `none`.
+The defaults are shown. Unicode normalization can be `NFC`, `NFD`, `NFKC`,
+`NFKD`, or `none`.
 
-Operations occur in this order:
+For each fragment, operations occur in this order:
 
-1. Configured descendants are removed from a copy of the selected XHTML
-   subtree, first by explicit fragment `omit` paths and then by EPUB semantic
-   type.
-2. The remaining XHTML is flattened, with `<br>` represented by a newline.
-3. Runs matched by Python `\s+` collapse to one ASCII space when enabled.
-4. Leading and trailing whitespace is removed when enabled.
-5. Unicode normalization is applied unless set to `none`.
+1. Explicitly omitted descendants are removed.
+2. Descendants with configured EPUB semantic types are removed.
+3. XHTML is flattened, with `<br>` represented by a newline.
+4. Runs matched by Python `\s+` collapse to one ASCII space when enabled.
+5. Leading and trailing whitespace is stripped when enabled.
+6. Unicode normalization is applied unless set to `none`.
 
-Each emitted fragment is normalized before joining. The joined result is then
-normalized once more. Fragment slice offsets and compiled prefix-removal slices
-refer to Unicode code points in normalized fragment text.
+Fragments are normalized before joining; the joined result is normalized once
+more. Slice offsets and compiled prefix-removal offsets count Unicode code
+points in normalized fragment text.
 
 ## EPUB semantic omissions
 
-`omit_epub_types` is an optional array of unique, nonempty EPUB type tokens.
-Every descendant whose whitespace-separated `epub:type` tokens intersect the
-set is removed while preserving its tail text. The default is an empty array.
-A typical recipe explicitly uses `['noteref', 'pagebreak']`.
+`omit_epub_types` is an array of unique, nonempty EPUB type tokens. A descendant
+whose whitespace-separated `epub:type` values intersect this set is removed
+while its tail text is preserved. The default is empty. A typical recipe uses
+`["noteref", "pagebreak"]`.
 
 ## Candidate source blocks
 
-`source_blocks` recognizes these optional members:
+`source_blocks` supports:
 
-- `include_documents`: case-insensitive archive-path globs; empty means all
-  eligible XHTML spine documents.
-- `exclude_documents`: case-insensitive archive-path globs applied after
-  inclusion.
-- `exclude_classes`: exact CSS class tokens compared case-insensitively.
-- `include_locators`: case-insensitive globs for `document#element-path`.
-- `exclude_locators`: case-insensitive locator globs applied last.
+- `include_documents`: case-insensitive EPUB-path globs; empty means all
+  eligible XHTML spine documents;
+- `exclude_documents`: case-insensitive path globs applied after inclusion;
+- `exclude_classes`: exact class tokens compared case-insensitively;
+- `include_locators`: case-insensitive `document#element-path` globs;
+- `exclude_locators`: locator globs applied after inclusion; and
 - `include_non_linear`: include `linear="no"` spine items; default `false`.
 
-Document and locator selectors are conjunctive: an included locator cannot
-bring back a document excluded by the document selectors.
+Document and locator selection are conjunctive. Locator inclusion cannot bring
+back an excluded document.
 
-Candidate elements are `p`, `h1` through `h6`, and `pre`. A `blockquote` or
-`li` is a candidate only when it contains no candidate primary descendant.
-Candidates retain EPUB spine and XHTML document order. Empty normalized blocks
-are discarded.
+Candidate elements are `p`, `h1` through `h6`, and `pre`. A `blockquote` or `li`
+is a candidate only when it has no primary candidate descendant. Candidates
+remain in spine and document order. Empty normalized blocks are discarded.
 
-## Mapping
+The stable local locator syntax is `document#element-path`, for example
+`text/chapter-01.xhtml#1.3.2`. Element paths are dot-separated, one-based child
+positions within the XHTML `body`.
+
+## Output
+
+The `output` object has this shape:
 
 ```json
-"mapping": {
-  "strategy": "ordered",
+"output": {
   "groups": {},
-  "join_separator": " ",
-  "type_rules": {},
+  "identifiers": {
+    "block": {"template": "{group}.{number:03d}", "start": 1},
+    "line": {
+      "template": "{group}.{block:03d}.{number:02d}",
+      "start": 1
+    }
+  },
+  "default": {"type": "paragraph", "role": "block"},
+  "rules": [],
   "skip_source": [],
-  "overrides": {},
+  "replacements": [],
+  "insertions": [],
   "compiled_sha256": "28354978484f35525c616d138bdeb8f801039d665235ac88bd02f1a25791c410"
 }
 ```
 
-`strategy` must be `ordered`. `compiled_sha256` is required during normal
-compilation and extraction. The remaining members have the defaults shown.
+`identifiers`, `default`, and `compiled_sha256` are required during normal
+extraction. The other members have the defaults shown.
 
-After grouping and removing skipped or override-reserved candidates, the
-compiler walks references and source candidates together. Unless a type rule
-or override says otherwise, each reference consumes and emits the next source
-candidate. Every reference must be produced and every available source
-candidate must be consumed.
+## Groups
 
-### Groups by locator
+Counters are independent within each group. Exactly one of three grouping
+mechanisms may be used. With an empty `groups` object, every candidate belongs
+to the single empty-string group.
 
-Groups keep independent cursors, which prevents a structural exception in one
-chapter or section from shifting everything after it.
+### Source-path pattern
 
 ```json
 "groups": {
-  "reference_pattern": "^(\\d+)\\.",
-  "reference_capture_kind": "decimal",
   "source_pattern": "chapter-(\\d+)\\.xhtml#",
-  "source_offset": 0
+  "capture_kind": "decimal",
+  "capture_width": 2
 }
 ```
 
-`reference_pattern` and `source_pattern` are case-insensitive regular
-expressions with exactly one capture. The former searches the canonical ID;
-the latter searches `source_locator`. `reference_capture_kind` is `string` by
-default or `decimal`; decimal capture removes leading zeroes.
+`source_pattern` is a case-insensitive regular expression with exactly one
+capturing group. It searches each source locator, including its `sNNN:` spine
+prefix. Every candidate must match.
 
-`source_offset` adds an integer to numeric source captures. A result below one
-is invalid. `reference_map` and `source_map` map captured strings to explicit
-group keys. Maps require patterns, must be nonempty, and `source_map` cannot be
-combined with `source_offset`.
-
-When `groups` is empty, all references and candidates belong to one group.
-
-### Groups by heading marker
-
-When EPUB filenames do not provide the canonical chapter number, a heading can
-establish the current group:
+### Source marker
 
 ```json
 "groups": {
-  "reference_pattern": "^(\\d+)\\.",
-  "reference_capture_kind": "decimal",
   "source_marker": {
     "pattern": "^CHAPTER\\s+([IVXLCDM]+)\\b",
-    "capture_kind": "roman",
     "case_insensitive": true
-  }
+  },
+  "capture_kind": "roman",
+  "capture_width": 2
 }
 ```
 
-`source_marker` is mutually exclusive with `source_pattern`. Its anchored
-`pattern` has exactly one capture and is matched against normalized block text.
-A match assigns that block and following blocks to the captured group until the
-next marker.
+The anchored marker pattern has exactly one capture and is matched against
+normalized candidate text. A match establishes the group for that candidate
+and following candidates until another marker matches. A candidate used for
+output before the first marker is an error. Marker groups may not repeat.
+Grouping is computed before skips and replacements, so a non-emitted marker can
+still establish a group.
 
-`capture_kind` is `string`, `decimal`, or `roman`. Decimal values normalize to
-ordinary decimal without leading zeroes. Roman values are case-insensitive
-during conversion but must use canonical subtractive notation in the range
-supported by standard Roman numerals. `case_insensitive` controls matching of
-the full marker pattern and defaults to `false`.
-
-A candidate before the first marker is an error. Marker groups must exist in
-the reference index, may not repeat, and must advance in reference-group order.
-Grouping happens before skipped and override-reserved candidates are removed,
-so a marker can still establish a group when it is not emitted normally.
-
-### Type rules
-
-A type rule applies to every non-overridden reference of that type:
+### Explicit transitions
 
 ```json
-"type_rules": {
-  "heading": {
-    "consume": 2,
-    "emit": [2],
-    "separator": " "
+"groups": {
+  "transitions": {
+    "text/front.xhtml#1": "front",
+    "text/chapter-01.xhtml#1": "chapter-01"
   }
 }
 ```
 
-Every type-rule key must occur as a type in the pinned reference index. An
-unknown or misspelled type is an error rather than an ignored rule.
+A transition assigns its group to the named candidate and all following
+candidates until the next transition. Every transition locator must select
+exactly one candidate. Transitions are useful when filename patterns alone do
+not express subsections or when headings do not contain machine-readable
+numbers.
 
-- `consume` is the positive number of consecutive candidates by which the
-  group cursor advances; default `1`.
-- `emit` is a nonempty array of unique one-based positions among those
-  candidates; default is every consumed position in order. Values cannot
-  exceed `consume`. Their array order is output order.
-- `separator` joins emitted fragments. It defaults to `mapping.join_separator`
-  when several parts are emitted and to the empty string for one part.
+### Capture conversion
 
-Thus `consume: 2, emit: [2]` accounts for a separate chapter-label block while
-emitting only the following title. Omitting `emit` joins both blocks.
+`source_pattern` and `source_marker` accept these shared members:
 
-A one-part rule can remove a structural prefix:
+- `capture_kind`: `string` (default), `decimal`, or `roman`;
+- `source_offset`: integer added to a numeric captured value; default `0`;
+- `source_map`: nonempty mapping from raw captures to final group names; and
+- `capture_width`: positive zero-padding width for numeric groups.
+
+Decimal conversion removes leading zeroes. Roman conversion is
+case-insensitive but requires canonical subtractive notation. A mapped capture
+is already a final group name. When `source_map` is present, it must include
+every raw capture encountered; a missing key is an error, with no fallback to
+capture conversion. A map cannot be combined with `capture_width` or a nonzero
+`source_offset`. These capture options require a source pattern or marker and
+do not apply to explicit transitions, even when `source_offset` is `0`.
+
+## Identifier generation
+
+The required block counter accepts `{group}` and `{number}` fields, and its
+template must contain `{number}`:
+
+```json
+"block": {"template": "{group}.{number:03d}", "start": 1}
+```
+
+The optional line counter accepts `{group}`, `{block}`, and `{number}` and must
+contain both `{block}` and `{number}`:
+
+```json
+"line": {
+  "template": "{group}.{block:03d}.{number:02d}",
+  "start": 1
+}
+```
+
+Templates use Python’s ordinary format mini-language. Conversions and nested
+replacement fields are not supported. Counter starts are nonnegative and
+default to `1`.
+
+Every emission has a nonempty `type` and one of four roles:
+
+- `block`: allocate the next block number in the current group;
+- `line-start`: allocate a new block number and the first nested line number;
+- `line`: allocate the next line under the most recent `line-start` in the
+  current group; or
+- `fixed`: render the required `id`, which can contain `{group}` but does not
+  advance a counter.
+
+An `id` is only allowed for `fixed`. A line role requires a line template, and
+`line` without a preceding `line-start` in the same group is an error. Every
+generated ID must be unique.
+
+Fixed IDs are suitable for structural labels such as `{group}.head` and for
+sparse exceptions such as an inserted footnote. They do not require an
+exhaustive identifier list.
+
+Ordinary `block` or `fixed` emissions, including replacement outputs, end the
+active verse sequence in their group. A `fixed` insertion preserves that
+sequence, so a footnote between verse lines leaves the next line number
+unchanged. Other insertion roles have their normal counter and verse-state
+effects.
+
+## Default emission and rules
+
+`default` handles every ordinary candidate that matches no rule:
+
+```json
+"default": {"type": "paragraph", "role": "block"}
+```
+
+Rules are tested in array order; the first match wins. A rule has an emission
+plus a nonempty `match` object:
+
+```json
+{
+  "match": {
+    "tag": "p",
+    "classes_all": ["verse"],
+    "locators": ["text/chapter-*.xhtml#*"],
+    "text_pattern": "^Sing",
+    "case_insensitive": true
+  },
+  "type": "line",
+  "role": "line-start"
+}
+```
+
+All configured match criteria must pass:
+
+- `tag`: case-insensitive exact element name;
+- `classes`: exact class-token set;
+- `classes_any`: at least one token must occur;
+- `classes_all`: every token must occur;
+- `locators`: at least one case-insensitive glob must match; and
+- `text_pattern`: regular-expression search in normalized text, optionally
+  controlled by `case_insensitive`.
+
+`classes`, `classes_any`, and `classes_all` compare class tokens exactly.
+`classes: []` matches only elements with no class tokens. Empty `classes_any`,
+`classes_all`, and `locators` arrays impose no restriction and do not count as
+match criteria. A match must contain at least one effective criterion; a
+`case_insensitive` flag alone is not one.
+
+### Structural consume and emit
+
+A rule can combine or discard consecutive candidates:
+
+```json
+{
+  "match": {"tag": "h1"},
+  "type": "heading",
+  "role": "fixed",
+  "id": "{group}.000",
+  "consume": 2,
+  "emit": [2],
+  "separator": " "
+}
+```
+
+- `consume` is a positive count, default `1`.
+- `emit` is a nonempty array of unique one-based positions within the consumed
+  candidates. It defaults to all positions in order.
+- `separator` joins emitted fragments. It defaults to a space for multiple
+  fragments and to the empty string for one.
+
+The consumed candidates must remain within one group and may not cross a skip,
+replacement, or insertion anchor. All consumed locators are recorded in the
+compiled plan, including candidates that are not emitted.
+
+A one-fragment rule can remove a required structural prefix:
 
 ```json
 "remove_prefix": {
@@ -237,101 +316,139 @@ A one-part rule can remove a structural prefix:
 }
 ```
 
-The regular expression must begin with `^`, must not match an empty string, and
-must match a nonempty prefix of the normalized emitted block at compilation.
-It must leave nonempty text. Prefix removal requires exactly one emitted part.
-Matching case-insensitively does not alter the casing of retained text. The
-compiler records the result as an explicit numeric fragment slice rather than
-placing the regular expression in the compiled plan.
+The pattern must begin with `^`, cannot match an empty prefix, must match the
+candidate, and must leave nonempty text. Prefix removal compiles to an explicit
+fragment slice; retained text keeps its original casing.
 
-### Skipped source blocks
+## Skipped source blocks
 
-`skip_source` lists exact EPUB-local locators such as
-`text/chapter.xhtml#1.2`. Each must identify exactly one selected candidate.
-Skipped candidates are accounted for but never assigned to a reference.
+`skip_source` is an array of exact local source locators. Each must identify one
+selected candidate. Skipped candidates are accounted for but produce no
+output. They still participate in group-marker and transition processing.
 
-### Overrides, joins, omissions, and splits
+## Source-anchored replacements
 
-Overrides are keyed by canonical reference ID and replace ordinary cursor
-mapping for that reference:
+A replacement substitutes one or more outputs for a selected source block:
 
 ```json
-"overrides": {
-  "01.014": {
-    "parts": [
+"replacements": [
+  {
+    "anchor": "text/chapter.xhtml#4.2",
+    "outputs": [
       {
-        "document": "text/chapter.xhtml",
-        "element_path": "4.2",
-        "omit": ["2"],
-        "slice": {"start": 0, "end": 42}
+        "type": "paragraph",
+        "role": "block",
+        "parts": [
+          {
+            "document": "text/chapter.xhtml",
+            "element_path": "4.2",
+            "slice": {"start": 0, "end": 42}
+          }
+        ]
       },
       {
-        "document": "text/notes.xhtml",
-        "element_path": "1.3"
+        "type": "paragraph",
+        "role": "block",
+        "parts": [
+          {
+            "document": "text/chapter.xhtml",
+            "element_path": "4.2",
+            "slice": {"start": 43, "end": 80}
+          }
+        ]
       }
-    ],
-    "separator": " "
+    ]
   }
-}
+]
 ```
 
-Each part requires `document`. `element_path` defaults to the XHTML `body`
-itself; otherwise it is a dot-separated one-based child path. `omit` contains
-relative descendant paths. Duplicate or ancestor/descendant-overlapping omit
-paths are invalid. `slice` is a zero-based, half-open normalized code-point
-range satisfying `0 <= start < end`.
+The anchor and every part locator must identify a selected candidate, and the
+anchor must occur in at least one output part. Part locators are reserved and
+removed from ordinary rule processing. The anchor’s group is used for every
+replacement output. Output IDs are generated in array order using the same
+roles and counters as ordinary rules.
 
-An override's part locators are reserved and removed from ordinary candidate
-mapping when present there. A locator cannot be both skipped and reserved.
-Override fragments may also address non-candidate or non-spine XHTML, which is
-useful for note bodies. Overrides do not inherit type-rule transforms.
+Each part requires `document`. `element_path` defaults to the XHTML `body`;
+otherwise it is a dot-separated one-based child path. `omit` lists relative
+descendant paths. Duplicate and ancestor/descendant-overlapping omissions are
+invalid. `slice` is a zero-based, half-open code-point range satisfying
+`0 <= start < end`.
 
-Several parts form an explicit join. Several overrides may use non-overlapping
-slices of the same source fragment to express a split. Whenever a
-`document`/`element_path` pair occurs more than once anywhere in `overrides`,
-every occurrence must have a slice and their half-open ranges must not overlap;
-adjacent ranges are allowed. Reusing a whole fragment, or combining a whole
-fragment with a slice of it, is an error. This check applies even when the
-occurrences specify different descendant omissions.
+Several parts in one output express a join. Several outputs can express a
+split. If a `document`/`element_path` pair is reused anywhere among
+replacements, every use must have a non-overlapping slice and the same set of
+`omit` paths. The order of those paths does not matter. This ensures the slice
+offsets refer to the same normalized fragment. Adjacent slices are allowed;
+whole-fragment reuse is not.
 
-Because overrides do not advance the group cursor, any replaced ordinary
-candidate must be reserved by an override part or explicitly skipped.
+## Source-anchored insertions
+
+An insertion emits material immediately after a selected, ordinarily emitted
+or replaced anchor:
+
+```json
+"insertions": [
+  {
+    "after": "text/chapter.xhtml#8.1",
+    "outputs": [
+      {
+        "type": "footnote",
+        "role": "fixed",
+        "id": "{group}.008-fn",
+        "parts": [
+          {"document": "text/notes.xhtml", "element_path": "2.1"}
+        ]
+      }
+    ]
+  }
+]
+```
+
+The anchor must identify one selected candidate. Unlike replacement parts,
+insertion parts may address other XHTML in the EPUB, including non-linear or
+otherwise unselected note documents. Insertions do not reserve their part
+locators. Their outputs use the anchor group and the ordinary identifier
+allocator, with fixed-ID insertions preserving any active verse sequence.
+
+If an ordinary rule consumes several candidates, an insertion can follow only
+the last consumed candidate, and that candidate must occur in `emit`. An
+insertion anchored to a discarded candidate is an error. An insertion at a
+replacement anchor follows all outputs from that replacement.
 
 ## Compilation and digest
 
-Compilation produces an immutable `CompiledRecipe`; there is no serialized
-compiled-recipe format. Every `CompiledBlock` records:
+Compilation creates an immutable `CompiledRecipe`; there is no serialized
+compiled-recipe format. Each `CompiledBlock` records its generated ID and type,
+fragments, separator, and any source locators consumed by an ordinary rule. The
+compiled recipe separately records sorted skipped and replacement-reserved
+locators.
 
-- canonical ID and type;
-- emitted `Fragment` values and separator; and
-- all source locators consumed to advance the cursor, including consumed parts
-  that were not emitted.
+The canonical digest includes all generated IDs and types, fragment selection,
+counter effects, separators, consumed locators, skips, reservations,
+normalization, and EPUB-type omissions. It therefore detects structural rule
+changes even if the resulting prose happens to look similar.
 
-The compiled recipe separately records sorted skipped and override-reserved
-locators. Its canonical digest also includes normalization and EPUB-type
-omissions. Changing `consume: 2, emit: [2]` to a superficially similar
-one-part selection therefore changes the digest.
+While authoring, compile without digest verification and save the result:
 
-Call `compile_recipe(..., verify_digest=False)` while authoring a recipe, then
-store `compiled_recipe_digest(result)` in `mapping.compiled_sha256`. Normal
-compilation and extraction verify it.
+```python
+from epub_blocks import compile_recipe, compiled_recipe_digest
 
-`metadata`, filesystem paths used to locate the recipe and reference-index
-file, and the input hashes themselves are excluded from the compiled digest
-because they are not compiled extraction behavior. EPUB-internal document and
-element paths are included. The EPUB and reference-index hashes independently
-pin the external inputs.
+compiled = compile_recipe("book.epub", recipe, verify_digest=False)
+recipe["output"]["compiled_sha256"] = compiled_recipe_digest(compiled)
+```
 
-## Output
+Normal compilation and extraction require and verify `compiled_sha256`.
+Metadata and the EPUB’s external filesystem path are excluded from the digest;
+the EPUB SHA-256 separately pins the input file.
+
+## Output APIs
 
 `extract_recipe` and `extract_recipe_file` return ordered `ExtractedBlock`
-values. `write_tsv` and the command-line program write headerless TSV columns:
+values. `write_tsv` and the CLI write headerless columns:
 
-1. canonical `id`;
-2. canonical `type`;
-3. extracted source `text`.
-
-The CLI form is:
+1. generated `id`;
+2. generated `type`;
+3. extracted `text`.
 
 ```bash
 epub-blocks book.epub recipe.json records.tsv
@@ -339,9 +456,10 @@ epub-blocks book.epub recipe.json records.tsv
 
 ## Schema and runtime validation
 
-The JSON Schema is distributed at
-`epub_blocks/schemas/recipe-v1.schema.json`. It catches structural mistakes in
+The distributed JSON Schema is
+`epub_blocks/schemas/recipe-v1.schema.json`. It catches structural errors in
 editors and pipelines. Runtime validation is authoritative and additionally
-checks the reference TSV, EPUB contents, group captures, Roman numerals,
-locator disposition, prefix matches, cursor exhaustion, fragments, and all
-three hashes.
+checks regular expressions, templates, EPUB contents, group captures, Roman
+numerals, locator uniqueness and disposition, fragment ranges, counter state,
+generated-ID uniqueness, source and compiled hashes, and all extraction safety
+limits.

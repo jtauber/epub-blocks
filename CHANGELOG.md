@@ -5,6 +5,22 @@ All notable changes to this project will be documented here. The project uses
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-04
+
+- Make recipes self-contained generators of output identifiers and types rather
+  than mappings to an externally stored reference table.
+- Add source-defined groups, identifier templates and counters, source-block
+  rules, nested line identifiers, and source-anchored replacements and
+  insertions.
+- Remove the runtime `references` input and the public `BlockReference` model.
+- Keep `recipe_version` at `"1"`: the project remains pre-1.0 with no known
+  external recipe users, so existing recipes should be regenerated.
+- Require complete source-group maps and consistent omission sets for reused
+  slices; reject insertions whose consumed anchor is discarded.
+- Preserve verse numbering across fixed-ID insertions, align structural
+  schema/runtime validation, and report identifier-format overflows as recipe
+  errors.
+
 ## 0.2.0 - 2026-09-04
 
 - Replace the provisional recipe contract shipped in 0.1.0. Because that

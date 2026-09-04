@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 import json
 import os
 import re
@@ -11,13 +10,13 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from string import Formatter
 from typing import BinaryIO, cast
 from zipfile import BadZipFile, ZipFile
 
 from .errors import EpubBlocksError
 from .extract import _extract_blocks_from_epub  # pyright: ignore[reportPrivateUsage]
 from .models import (
-    BlockReference,
     CompiledBlock,
     CompiledRecipe,
     EpubPackage,
@@ -27,7 +26,7 @@ from .models import (
     TextBlock,
     UnicodeNormalization,
 )
-from .package import read_epub_package
+from .package import matches, read_epub_package
 from .safety import DEFAULT_SAFETY_LIMITS, EpubArchive, SafetyLimits
 from .xhtml import extract_fragment, normalize_text
 from .xml import XmlElement
@@ -46,7 +45,7 @@ _UNICODE_NORMALIZATIONS: tuple[UnicodeNormalization, ...] = (
     "NFKD",
     "none",
 )
-_REFERENCE_COLUMN_DEFAULTS = {"id": "id", "type": "type"}
+_ROLES = frozenset({"block", "line-start", "line", "fixed"})
 
 
 class _JsonObject(dict[str, object]):
@@ -80,32 +79,44 @@ class _SourceBlocksSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class _ReferenceSpec:
-    path: str
-    sha256: str
-    columns: Mapping[str, str]
-
-
-@dataclass(frozen=True, slots=True)
 class _GroupSpec:
-    reference_pattern: str | None
     source_pattern: str | None
     source_marker: _SourceMarker | None
-    reference_capture_kind: str
+    capture_kind: str
     source_offset: int
-    reference_map: Mapping[str, str]
     source_map: Mapping[str, str]
+    capture_width: int | None
+    transitions: Mapping[str, str]
 
 
 @dataclass(frozen=True, slots=True)
 class _SourceMarker:
     pattern: str
-    capture_kind: str
     case_insensitive: bool
 
 
 @dataclass(frozen=True, slots=True)
-class _TypeRule:
+class _MatchSpec:
+    tag: str | None
+    classes: frozenset[str] | None
+    classes_any: frozenset[str]
+    classes_all: frozenset[str]
+    locators: tuple[str, ...]
+    text_pattern: str | None
+    case_insensitive: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _EmissionSpec:
+    block_type: str
+    role: str
+    block_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _BlockRule:
+    match: _MatchSpec
+    emission: _EmissionSpec
     consume: int
     emit: tuple[int, ...] | None
     separator: str | None
@@ -119,18 +130,41 @@ class _RemovePrefix:
 
 
 @dataclass(frozen=True, slots=True)
-class _OverrideSpec:
+class _ProducedBlockSpec:
+    emission: _EmissionSpec
     parts: tuple[Fragment, ...]
     separator: str
 
 
 @dataclass(frozen=True, slots=True)
-class _MappingSpec:
+class _ReplacementSpec:
+    anchor: str
+    outputs: tuple[_ProducedBlockSpec, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _InsertionSpec:
+    after: str
+    outputs: tuple[_ProducedBlockSpec, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentifierSpec:
+    block_template: str
+    block_start: int
+    line_template: str | None
+    line_start: int
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputSpec:
     groups: _GroupSpec
-    join_separator: str
-    type_rules: Mapping[str, _TypeRule]
+    identifiers: _IdentifierSpec
+    default: _EmissionSpec
+    rules: tuple[_BlockRule, ...]
     skip_source: tuple[str, ...]
-    overrides: Mapping[str, _OverrideSpec]
+    replacements: tuple[_ReplacementSpec, ...]
+    insertions: tuple[_InsertionSpec, ...]
     compiled_sha256: str | None
 
 
@@ -138,11 +172,10 @@ class _MappingSpec:
 class _RecipeSpec:
     identifier: str
     sha256: str
-    references: _ReferenceSpec
     normalization: NormalizationOptions
     omitted_types: frozenset[str]
     source_blocks: _SourceBlocksSpec
-    mapping: _MappingSpec
+    output: _OutputSpec
 
 
 def _stream_sha256(source: BinaryIO) -> str:
@@ -366,28 +399,6 @@ def _remove_prefix(value: object, location: str) -> _RemovePrefix:
     return _RemovePrefix(pattern, case_insensitive)
 
 
-def _reference_spec(value: object, location: str) -> _ReferenceSpec:
-    references = _mapping(value, location)
-    _check_members(references, frozenset({"path", "sha256", "columns"}), location)
-    path = _nonempty_string(references.get("path"), f"{location}.path")
-    digest = _sha256(references.get("sha256"), f"{location}.sha256")
-    columns_value = _mapping(references.get("columns", {}), f"{location}.columns")
-    _check_members(
-        columns_value,
-        frozenset(_REFERENCE_COLUMN_DEFAULTS),
-        f"{location}.columns",
-    )
-    columns = {
-        name: _nonempty_string(
-            columns_value.get(name, default), f"{location}.columns.{name}"
-        )
-        for name, default in _REFERENCE_COLUMN_DEFAULTS.items()
-    }
-    if len(set(columns.values())) != len(columns):
-        raise EpubBlocksError(f"{location}.columns: column names must be unique")
-    return _ReferenceSpec(path, digest, columns)
-
-
 def _source_blocks_spec(value: object, location: str) -> _SourceBlocksSpec:
     source = _mapping(value, location)
     _check_members(
@@ -444,50 +455,42 @@ def _group_spec(value: object, location: str) -> _GroupSpec:
         groups,
         frozenset(
             {
-                "reference_pattern",
-                "reference_capture_kind",
                 "source_pattern",
                 "source_marker",
+                "capture_kind",
                 "source_offset",
-                "reference_map",
                 "source_map",
+                "capture_width",
+                "transitions",
             }
         ),
         location,
     )
-    has_reference = "reference_pattern" in groups
     has_source_pattern = "source_pattern" in groups
     has_source_marker = "source_marker" in groups
-    if has_source_pattern and has_source_marker:
+    has_transitions = "transitions" in groups
+    if sum((has_source_pattern, has_source_marker, has_transitions)) > 1:
         raise EpubBlocksError(
-            f"{location}: source_pattern and source_marker are mutually exclusive"
+            f"{location}: source_pattern, source_marker, and transitions are "
+            "mutually exclusive"
         )
-    if has_reference != (has_source_pattern or has_source_marker):
-        raise EpubBlocksError(
-            f"{location}: reference_pattern and exactly one source grouping "
-            "mechanism must be set together or all omitted"
-        )
-    reference_pattern = (
-        _group_pattern(groups["reference_pattern"], f"{location}.reference_pattern")
-        if has_reference
-        else None
-    )
     source_pattern = (
         _group_pattern(groups["source_pattern"], f"{location}.source_pattern")
         if has_source_pattern
         else None
     )
-    reference_capture_kind = groups.get("reference_capture_kind", "string")
-    if not isinstance(reference_capture_kind, str) or reference_capture_kind not in {
+    capture_kind = groups.get("capture_kind", "string")
+    if not isinstance(capture_kind, str) or capture_kind not in {
         "string",
         "decimal",
+        "roman",
     }:
         raise EpubBlocksError(
-            f"{location}.reference_capture_kind: must be 'string' or 'decimal'"
+            f"{location}.capture_kind: must be 'string', 'decimal', or 'roman'"
         )
-    if "reference_capture_kind" in groups and not has_reference:
+    if "capture_kind" in groups and not (has_source_pattern or has_source_marker):
         raise EpubBlocksError(
-            f"{location}.reference_capture_kind: requires reference_pattern"
+            f"{location}.capture_kind: requires source_pattern or source_marker"
         )
 
     source_marker: _SourceMarker | None = None
@@ -496,7 +499,7 @@ def _group_spec(value: object, location: str) -> _GroupSpec:
         marker = _mapping(groups["source_marker"], marker_location)
         _check_members(
             marker,
-            frozenset({"pattern", "capture_kind", "case_insensitive"}),
+            frozenset({"pattern", "case_insensitive"}),
             marker_location,
         )
         marker_pattern = _group_pattern(
@@ -504,184 +507,447 @@ def _group_spec(value: object, location: str) -> _GroupSpec:
         )
         if not marker_pattern.startswith("^"):
             raise EpubBlocksError(f"{marker_location}.pattern: must be anchored with ^")
-        capture_kind = marker.get("capture_kind")
-        if not isinstance(capture_kind, str) or capture_kind not in {
-            "string",
-            "decimal",
-            "roman",
-        }:
-            raise EpubBlocksError(
-                f"{marker_location}.capture_kind: must be 'string', 'decimal', "
-                "or 'roman'"
-            )
         case_insensitive = marker.get("case_insensitive", False)
         if not isinstance(case_insensitive, bool):
             raise EpubBlocksError(
                 f"{marker_location}.case_insensitive: must be a boolean"
             )
-        source_marker = _SourceMarker(marker_pattern, capture_kind, case_insensitive)
+        source_marker = _SourceMarker(marker_pattern, case_insensitive)
 
     source_offset = _integer(
         groups.get("source_offset", 0), f"{location}.source_offset"
     )
-    reference_map = _string_map(
-        groups.get("reference_map", {}), f"{location}.reference_map"
-    )
     source_map = _string_map(groups.get("source_map", {}), f"{location}.source_map")
-    if "reference_map" in groups and not reference_map:
-        raise EpubBlocksError(f"{location}.reference_map: must not be empty")
     if "source_map" in groups and not source_map:
         raise EpubBlocksError(f"{location}.source_map: must not be empty")
-    if (reference_map or source_map) and reference_pattern is None:
-        raise EpubBlocksError(f"{location}: group maps require group patterns")
-    if source_offset and reference_pattern is None:
-        raise EpubBlocksError(f"{location}: source_offset requires group patterns")
+    if ("source_map" in groups or "source_offset" in groups) and not (
+        has_source_pattern or has_source_marker
+    ):
+        raise EpubBlocksError(
+            f"{location}: source_map and source_offset require a source pattern"
+        )
     if source_map and source_offset:
         raise EpubBlocksError(
             f"{location}: source_offset cannot be combined with source_map"
         )
+    capture_width: int | None = None
+    if "capture_width" in groups:
+        if not (has_source_pattern or has_source_marker):
+            raise EpubBlocksError(
+                f"{location}.capture_width: requires a source pattern"
+            )
+        capture_width = _integer(
+            groups["capture_width"], f"{location}.capture_width", minimum=1
+        )
+        if source_map:
+            raise EpubBlocksError(
+                f"{location}: capture_width cannot be combined with source_map"
+            )
+    transitions = _string_map(groups.get("transitions", {}), f"{location}.transitions")
+    if has_transitions and not transitions:
+        raise EpubBlocksError(f"{location}.transitions: must not be empty")
+    for locator in transitions:
+        _validate_source_locator(locator, f"{location}.transitions[{locator!r}]")
     return _GroupSpec(
-        reference_pattern,
         source_pattern,
         source_marker,
-        reference_capture_kind,
+        capture_kind,
         source_offset,
-        reference_map,
         source_map,
+        capture_width,
+        transitions,
     )
 
 
-def _mapping_spec(
-    value: object, location: str, *, require_compiled_hash: bool
-) -> _MappingSpec:
-    mapping = _mapping(value, location)
+def _validate_source_locator(value: str, location: str) -> None:
+    if _SOURCE_LOCATOR.fullmatch(value) is None:
+        raise EpubBlocksError(
+            f"{location}: must contain a document and one-based element path "
+            "separated by #"
+        )
+
+
+def _emission_spec(value: Mapping[str, object], location: str) -> _EmissionSpec:
+    block_type = _nonempty_string(value.get("type"), f"{location}.type")
+    role = value.get("role", "block")
+    if not isinstance(role, str) or role not in _ROLES:
+        raise EpubBlocksError(
+            f"{location}.role: must be 'block', 'line-start', 'line', or 'fixed'"
+        )
+    block_id = (
+        _nonempty_string(value["id"], f"{location}.id") if "id" in value else None
+    )
+    if role == "fixed" and block_id is None:
+        raise EpubBlocksError(f"{location}.id: required when role is 'fixed'")
+    if role != "fixed" and block_id is not None:
+        raise EpubBlocksError(f"{location}.id: only allowed when role is 'fixed'")
+    if block_id is not None:
+        _validate_template(
+            block_id,
+            f"{location}.id",
+            allowed_fields=frozenset({"group"}),
+            required_fields=frozenset(),
+        )
+    return _EmissionSpec(block_type, role, block_id)
+
+
+def _match_spec(value: object, location: str) -> _MatchSpec:
+    spec = _mapping(value, location)
     _check_members(
-        mapping,
+        spec,
         frozenset(
             {
-                "strategy",
+                "tag",
+                "classes",
+                "classes_any",
+                "classes_all",
+                "locators",
+                "text_pattern",
+                "case_insensitive",
+            }
+        ),
+        location,
+    )
+    tag = _nonempty_string(spec["tag"], f"{location}.tag") if "tag" in spec else None
+    classes = (
+        frozenset(_string_array(spec["classes"], f"{location}.classes"))
+        if "classes" in spec
+        else None
+    )
+    classes_any = frozenset(
+        _string_array(spec.get("classes_any", []), f"{location}.classes_any")
+    )
+    classes_all = frozenset(
+        _string_array(spec.get("classes_all", []), f"{location}.classes_all")
+    )
+    locators = _string_array(spec.get("locators", []), f"{location}.locators")
+    text_pattern = (
+        _nonempty_string(spec["text_pattern"], f"{location}.text_pattern")
+        if "text_pattern" in spec
+        else None
+    )
+    if text_pattern is not None:
+        try:
+            re.compile(text_pattern)
+        except re.error as error:
+            raise EpubBlocksError(
+                f"{location}.text_pattern: invalid regular expression: {error}"
+            ) from error
+    case_insensitive = spec.get("case_insensitive", False)
+    if not isinstance(case_insensitive, bool):
+        raise EpubBlocksError(f"{location}.case_insensitive: must be a boolean")
+    if not any(
+        (
+            tag is not None,
+            classes is not None,
+            classes_any,
+            classes_all,
+            locators,
+            text_pattern is not None,
+        )
+    ):
+        raise EpubBlocksError(f"{location}: must contain at least one criterion")
+    return _MatchSpec(
+        tag,
+        classes,
+        classes_any,
+        classes_all,
+        locators,
+        text_pattern,
+        case_insensitive,
+    )
+
+
+def _block_rule(value: object, location: str) -> _BlockRule:
+    rule = _mapping(value, location)
+    _check_members(
+        rule,
+        frozenset(
+            {
+                "match",
+                "type",
+                "role",
+                "id",
+                "consume",
+                "emit",
+                "separator",
+                "remove_prefix",
+            }
+        ),
+        location,
+    )
+    emission = _emission_spec(rule, location)
+    match = _match_spec(rule.get("match"), f"{location}.match")
+    consume = _integer(rule.get("consume", 1), f"{location}.consume", minimum=1)
+    emit = _integer_array(rule["emit"], f"{location}.emit") if "emit" in rule else None
+    if emit is not None and max(emit) > consume:
+        raise EpubBlocksError(
+            f"{location}.emit: values must not exceed consume ({consume})"
+        )
+    separator_value: str | None = None
+    if "separator" in rule:
+        raw_separator = rule["separator"]
+        if not isinstance(raw_separator, str):
+            raise EpubBlocksError(f"{location}.separator: must be a string")
+        separator_value = raw_separator
+    remove_prefix = (
+        _remove_prefix(rule["remove_prefix"], f"{location}.remove_prefix")
+        if "remove_prefix" in rule
+        else None
+    )
+    emitted_count = len(emit) if emit is not None else consume
+    if remove_prefix is not None and emitted_count != 1:
+        raise EpubBlocksError(
+            f"{location}.remove_prefix: requires exactly one emitted part"
+        )
+    return _BlockRule(
+        match,
+        emission,
+        consume,
+        emit,
+        separator_value,
+        remove_prefix,
+    )
+
+
+def _validate_template(
+    template: str,
+    location: str,
+    *,
+    allowed_fields: frozenset[str],
+    required_fields: frozenset[str],
+) -> None:
+    fields: set[str] = set()
+    try:
+        parsed = tuple(Formatter().parse(template))
+    except ValueError as error:
+        raise EpubBlocksError(f"{location}: invalid template: {error}") from error
+    for _literal, field, format_spec, conversion in parsed:
+        if field is None:
+            continue
+        if field not in allowed_fields:
+            raise EpubBlocksError(f"{location}: unsupported field {field!r}")
+        if conversion is not None:
+            raise EpubBlocksError(f"{location}: conversions are not supported")
+        if format_spec is not None and ("{" in format_spec or "}" in format_spec):
+            raise EpubBlocksError(f"{location}: nested fields are not supported")
+        fields.add(field)
+    missing = sorted(required_fields - fields)
+    if missing:
+        names = ", ".join(repr(name) for name in missing)
+        raise EpubBlocksError(f"{location}: missing required field(s): {names}")
+
+
+def _identifiers_spec(value: object, location: str) -> _IdentifierSpec:
+    identifiers = _mapping(value, location)
+    _check_members(identifiers, frozenset({"block", "line"}), location)
+    block = _mapping(identifiers.get("block"), f"{location}.block")
+    _check_members(block, frozenset({"template", "start"}), f"{location}.block")
+    block_template = _nonempty_string(
+        block.get("template"), f"{location}.block.template"
+    )
+    _validate_template(
+        block_template,
+        f"{location}.block.template",
+        allowed_fields=frozenset({"group", "number"}),
+        required_fields=frozenset({"number"}),
+    )
+    block_start = _integer(block.get("start", 1), f"{location}.block.start", minimum=0)
+    line_template: str | None = None
+    line_start = 1
+    if "line" in identifiers:
+        line = _mapping(identifiers["line"], f"{location}.line")
+        _check_members(line, frozenset({"template", "start"}), f"{location}.line")
+        line_template = _nonempty_string(
+            line.get("template"), f"{location}.line.template"
+        )
+        _validate_template(
+            line_template,
+            f"{location}.line.template",
+            allowed_fields=frozenset({"group", "block", "number"}),
+            required_fields=frozenset({"block", "number"}),
+        )
+        line_start = _integer(line.get("start", 1), f"{location}.line.start", minimum=0)
+    return _IdentifierSpec(block_template, block_start, line_template, line_start)
+
+
+def _produced_block(value: object, location: str) -> _ProducedBlockSpec:
+    output = _mapping(value, location)
+    _check_members(
+        output,
+        frozenset({"type", "role", "id", "parts", "separator"}),
+        location,
+    )
+    emission = _emission_spec(output, location)
+    parts_value = output.get("parts")
+    if not isinstance(parts_value, list) or not parts_value:
+        raise EpubBlocksError(f"{location}.parts: must be a non-empty array")
+    parts = tuple(
+        _fragment(part, f"{location}.parts[{index}]")
+        for index, part in enumerate(cast(list[object], parts_value), 1)
+    )
+    separator = output.get("separator", "")
+    if not isinstance(separator, str):
+        raise EpubBlocksError(f"{location}.separator: must be a string")
+    return _ProducedBlockSpec(emission, parts, separator)
+
+
+def _produced_blocks(value: object, location: str) -> tuple[_ProducedBlockSpec, ...]:
+    if not isinstance(value, list) or not value:
+        raise EpubBlocksError(f"{location}: must be a non-empty array")
+    return tuple(
+        _produced_block(item, f"{location}[{index}]")
+        for index, item in enumerate(cast(list[object], value), 1)
+    )
+
+
+def _output_spec(
+    value: object, location: str, *, require_compiled_hash: bool
+) -> _OutputSpec:
+    output = _mapping(value, location)
+    _check_members(
+        output,
+        frozenset(
+            {
                 "groups",
-                "join_separator",
-                "type_rules",
+                "identifiers",
+                "default",
+                "rules",
                 "skip_source",
-                "overrides",
+                "replacements",
+                "insertions",
                 "compiled_sha256",
             }
         ),
         location,
     )
-    if mapping.get("strategy") != "ordered":
-        raise EpubBlocksError(f"{location}.strategy: unsupported strategy")
-    groups = _group_spec(mapping.get("groups", {}), f"{location}.groups")
-    join_separator = mapping.get("join_separator", " ")
-    if not isinstance(join_separator, str):
-        raise EpubBlocksError(f"{location}.join_separator: must be a string")
-
-    type_values = _mapping(mapping.get("type_rules", {}), f"{location}.type_rules")
-    type_rules: dict[str, _TypeRule] = {}
-    for block_type, rule_value in type_values.items():
-        if not block_type:
-            raise EpubBlocksError(
-                f"{location}.type_rules: member names must be non-empty"
-            )
-        rule_location = f"{location}.type_rules[{block_type!r}]"
-        rule = _mapping(rule_value, rule_location)
-        _check_members(
-            rule,
-            frozenset({"consume", "emit", "separator", "remove_prefix"}),
-            rule_location,
-        )
-        consume = _integer(
-            rule.get("consume", 1), f"{rule_location}.consume", minimum=1
-        )
-        emit = (
-            _integer_array(rule["emit"], f"{rule_location}.emit")
-            if "emit" in rule
-            else None
-        )
-        if emit is not None and max(emit) > consume:
-            raise EpubBlocksError(
-                f"{rule_location}.emit: values must not exceed consume ({consume})"
-            )
-        separator_value = rule.get("separator")
-        if separator_value is not None and not isinstance(separator_value, str):
-            raise EpubBlocksError(f"{rule_location}.separator: must be a string")
-        remove_prefix = (
-            _remove_prefix(rule["remove_prefix"], f"{rule_location}.remove_prefix")
-            if "remove_prefix" in rule
-            else None
-        )
-        emitted_count = len(emit) if emit is not None else consume
-        if remove_prefix is not None and emitted_count != 1:
-            raise EpubBlocksError(
-                f"{rule_location}.remove_prefix: requires exactly one emitted part"
-            )
-        type_rules[block_type] = _TypeRule(
-            consume,
-            emit,
-            separator_value,
-            remove_prefix,
-        )
-
+    groups = _group_spec(output.get("groups", {}), f"{location}.groups")
+    identifiers = _identifiers_spec(
+        output.get("identifiers"), f"{location}.identifiers"
+    )
+    default_value = _mapping(output.get("default"), f"{location}.default")
+    _check_members(
+        default_value, frozenset({"type", "role", "id"}), f"{location}.default"
+    )
+    default = _emission_spec(default_value, f"{location}.default")
+    rules_value = output.get("rules", [])
+    if not isinstance(rules_value, list):
+        raise EpubBlocksError(f"{location}.rules: must be an array")
+    rules = tuple(
+        _block_rule(item, f"{location}.rules[{index}]")
+        for index, item in enumerate(cast(list[object], rules_value), 1)
+    )
     skip_source = _string_array(
-        mapping.get("skip_source", []), f"{location}.skip_source"
+        output.get("skip_source", []), f"{location}.skip_source"
     )
     for index, locator in enumerate(skip_source, 1):
-        if _SOURCE_LOCATOR.fullmatch(locator) is None:
-            raise EpubBlocksError(
-                f"{location}.skip_source[{index}]: must contain a document and "
-                "one-based element path separated by #"
-            )
+        _validate_source_locator(locator, f"{location}.skip_source[{index}]")
 
-    overrides_value = _mapping(mapping.get("overrides", {}), f"{location}.overrides")
-    overrides: dict[str, _OverrideSpec] = {}
-    for block_id, override_value in overrides_value.items():
-        if not block_id:
-            raise EpubBlocksError(
-                f"{location}.overrides: member names must be non-empty"
+    replacements_value = output.get("replacements", [])
+    if not isinstance(replacements_value, list):
+        raise EpubBlocksError(f"{location}.replacements: must be an array")
+    replacements: list[_ReplacementSpec] = []
+    replacement_anchors: set[str] = set()
+    for index, item in enumerate(cast(list[object], replacements_value), 1):
+        item_location = f"{location}.replacements[{index}]"
+        replacement = _mapping(item, item_location)
+        _check_members(replacement, frozenset({"anchor", "outputs"}), item_location)
+        anchor = _nonempty_string(replacement.get("anchor"), f"{item_location}.anchor")
+        _validate_source_locator(anchor, f"{item_location}.anchor")
+        if anchor in replacement_anchors:
+            raise EpubBlocksError(f"{item_location}.anchor: duplicate anchor")
+        replacement_anchors.add(anchor)
+        replacements.append(
+            _ReplacementSpec(
+                anchor,
+                _produced_blocks(
+                    replacement.get("outputs"), f"{item_location}.outputs"
+                ),
             )
-        override_location = f"{location}.overrides[{block_id!r}]"
-        override = _mapping(override_value, override_location)
-        _check_members(override, frozenset({"parts", "separator"}), override_location)
-        parts_value = override.get("parts")
-        if not isinstance(parts_value, list) or not parts_value:
-            raise EpubBlocksError(
-                f"{override_location}.parts: must be a non-empty array"
-            )
-        parts = tuple(
-            _fragment(part, f"{override_location}.parts[{index}]")
-            for index, part in enumerate(cast(list[object], parts_value), 1)
         )
-        separator = override.get("separator", "")
-        if not isinstance(separator, str):
-            raise EpubBlocksError(f"{override_location}.separator: must be a string")
-        overrides[block_id] = _OverrideSpec(parts, separator)
+        if anchor not in {
+            _fragment_locator(part)
+            for produced in replacements[-1].outputs
+            for part in produced.parts
+        }:
+            raise EpubBlocksError(
+                f"{item_location}.anchor: must also occur in an output part"
+            )
 
-    _validate_override_reuse(overrides, f"{location}.overrides")
+    insertions_value = output.get("insertions", [])
+    if not isinstance(insertions_value, list):
+        raise EpubBlocksError(f"{location}.insertions: must be an array")
+    insertions: list[_InsertionSpec] = []
+    insertion_anchors: set[str] = set()
+    for index, item in enumerate(cast(list[object], insertions_value), 1):
+        item_location = f"{location}.insertions[{index}]"
+        insertion = _mapping(item, item_location)
+        _check_members(insertion, frozenset({"after", "outputs"}), item_location)
+        after = _nonempty_string(insertion.get("after"), f"{item_location}.after")
+        _validate_source_locator(after, f"{item_location}.after")
+        if after in insertion_anchors:
+            raise EpubBlocksError(f"{item_location}.after: duplicate anchor")
+        insertion_anchors.add(after)
+        insertions.append(
+            _InsertionSpec(
+                after,
+                _produced_blocks(insertion.get("outputs"), f"{item_location}.outputs"),
+            )
+        )
+
+    emissions = (
+        default,
+        *(rule.emission for rule in rules),
+        *(
+            produced.emission
+            for replacement in replacements
+            for produced in replacement.outputs
+        ),
+        *(
+            produced.emission
+            for insertion in insertions
+            for produced in insertion.outputs
+        ),
+    )
+    if any(item.role in {"line-start", "line"} for item in emissions) and (
+        identifiers.line_template is None
+    ):
+        raise EpubBlocksError(f"{location}.identifiers.line: required by a line role")
+
+    _validate_fragment_reuse(
+        {
+            f"replacement {index} output {output_index}": produced.parts
+            for index, replacement in enumerate(replacements, 1)
+            for output_index, produced in enumerate(replacement.outputs, 1)
+        },
+        f"{location}.replacements",
+    )
 
     compiled_sha256: str | None = None
-    if require_compiled_hash or "compiled_sha256" in mapping:
+    if require_compiled_hash or "compiled_sha256" in output:
         compiled_sha256 = _sha256(
-            mapping.get("compiled_sha256"), f"{location}.compiled_sha256"
+            output.get("compiled_sha256"), f"{location}.compiled_sha256"
         )
-    return _MappingSpec(
+    return _OutputSpec(
         groups,
-        join_separator,
-        type_rules,
+        identifiers,
+        default,
+        rules,
         skip_source,
-        overrides,
+        tuple(replacements),
+        tuple(insertions),
         compiled_sha256,
     )
 
 
-def _validate_override_reuse(
-    overrides: Mapping[str, _OverrideSpec], location: str
+def _validate_fragment_reuse(
+    outputs: Mapping[str, tuple[Fragment, ...]], location: str
 ) -> None:
     uses: dict[tuple[str, str], list[tuple[str, int, Fragment]]] = defaultdict(list)
-    for block_id, override in overrides.items():
-        for part_index, part in enumerate(override.parts, 1):
+    for label, parts in outputs.items():
+        for part_index, part in enumerate(parts, 1):
             uses[(part.document_path, part.element_path)].append(
-                (block_id, part_index, part)
+                (label, part_index, part)
             )
 
     for (document_path, element_path), entries in uses.items():
@@ -693,15 +959,20 @@ def _validate_override_reuse(
                 f"{location}: source fragment {locator!r} is reused; every reuse "
                 "must use non-overlapping slices"
             )
+        if len({frozenset(part.omit_paths) for _, _, part in entries}) != 1:
+            raise EpubBlocksError(
+                f"{location}: source fragment {locator!r} is reused with different "
+                "omissions; slice offsets must use the same omitted paths"
+            )
 
         sliced = sorted(
             (
                 cast(int, part.start),
                 cast(int, part.end),
-                block_id,
+                label,
                 part_index,
             )
-            for block_id, part_index, part in entries
+            for label, part_index, part in entries
         )
         _, previous_end, previous_id, previous_part = sliced[0]
         for start, end, block_id, part_index in sliced[1:]:
@@ -725,11 +996,10 @@ def _parse_recipe(
                 "recipe_version",
                 "metadata",
                 "epub",
-                "references",
                 "normalization",
                 "omit_epub_types",
                 "source_blocks",
-                "mapping",
+                "output",
             }
         ),
         location,
@@ -743,7 +1013,6 @@ def _parse_recipe(
     _check_members(epub, frozenset({"identifier", "sha256"}), f"{location}.epub")
     identifier = _nonempty_string(epub.get("identifier"), f"{location}.epub.identifier")
     source_sha256 = _sha256(epub.get("sha256"), f"{location}.epub.sha256")
-    references = _reference_spec(recipe.get("references"), f"{location}.references")
     normalization = _normalization(
         recipe.get("normalization", {}), f"{location}.normalization"
     )
@@ -753,94 +1022,19 @@ def _parse_recipe(
     source_blocks = _source_blocks_spec(
         recipe.get("source_blocks"), f"{location}.source_blocks"
     )
-    mapping = _mapping_spec(
-        recipe.get("mapping"),
-        f"{location}.mapping",
+    output = _output_spec(
+        recipe.get("output"),
+        f"{location}.output",
         require_compiled_hash=require_compiled_hash,
     )
     return _RecipeSpec(
         identifier,
         source_sha256,
-        references,
         normalization,
         omitted_types,
         source_blocks,
-        mapping,
+        output,
     )
-
-
-def _reference_path(spec: _ReferenceSpec, base_dir: StrPath | None) -> Path:
-    path = Path(spec.path)
-    if path.is_absolute():
-        return path
-    if base_dir is None:
-        raise EpubBlocksError(
-            "recipe.references.path: relative paths require a recipe base directory"
-        )
-    return Path(base_dir) / path
-
-
-def _read_references(
-    spec: _ReferenceSpec, base_dir: StrPath | None
-) -> list[BlockReference]:
-    path = _reference_path(spec, base_dir)
-    data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != spec.sha256:
-        raise EpubBlocksError(f"{path}: reference-index SHA-256 does not match recipe")
-    references: list[BlockReference] = []
-    seen: set[str] = set()
-    try:
-        with io.StringIO(data.decode("utf-8"), newline="") as source:
-            reader = csv.reader(source, delimiter="\t", strict=True)
-            header = next(reader, None)
-            if header is None or not header:
-                raise EpubBlocksError(f"{path}: reference index has no header")
-            if len(header) != 2:
-                raise EpubBlocksError(
-                    f"{path}: reference index must have exactly two columns"
-                )
-            if len(set(header)) != len(header):
-                raise EpubBlocksError(f"{path}: reference index has duplicate columns")
-            missing = [
-                column for column in spec.columns.values() if column not in header
-            ]
-            if missing:
-                names = ", ".join(repr(name) for name in missing)
-                raise EpubBlocksError(
-                    f"{path}: reference index missing column(s): {names}"
-                )
-            positions = {
-                name: header.index(column) for name, column in spec.columns.items()
-            }
-            for line_number, row in enumerate(reader, 2):
-                if len(row) != 2:
-                    raise EpubBlocksError(
-                        f"{path}:{line_number}: expected 2 fields, found {len(row)}"
-                    )
-                block_id = row[positions["id"]]
-                block_type = row[positions["type"]]
-                if not block_id:
-                    raise EpubBlocksError(
-                        f"{path}:{line_number}: empty canonical reference"
-                    )
-                if block_id in seen:
-                    raise EpubBlocksError(
-                        f"{path}:{line_number}: duplicate canonical reference "
-                        f"{block_id!r}"
-                    )
-                if not block_type:
-                    raise EpubBlocksError(f"{path}:{line_number}: empty block type")
-                references.append(BlockReference(block_id, block_type))
-                seen.add(block_id)
-    except UnicodeDecodeError as error:
-        raise EpubBlocksError(f"{path}: reference index is not UTF-8") from error
-    except csv.Error as error:
-        raise EpubBlocksError(
-            f"{path}: invalid reference-index TSV: {error}"
-        ) from error
-    if not references:
-        raise EpubBlocksError(f"{path}: reference index has no records")
-    return references
 
 
 _ROMAN_PATTERN = re.compile(
@@ -879,153 +1073,113 @@ def _capture_key(value: str, kind: str, location: str) -> str:
     raise AssertionError(f"validated capture kind is unknown: {kind!r}")
 
 
-def _group_references(
-    records: Sequence[BlockReference], spec: _GroupSpec
-) -> dict[str, list[BlockReference]]:
-    if spec.reference_pattern is None:
-        return {"": list(records)}
-    expression = re.compile(spec.reference_pattern, re.IGNORECASE)
-    grouped: dict[str, list[BlockReference]] = defaultdict(list)
-    for record in records:
-        match = expression.search(record.block_id)
-        if not match:
+def _captured_group(value: str, spec: _GroupSpec, location: str) -> str:
+    if spec.source_map:
+        if value not in spec.source_map:
             raise EpubBlocksError(
-                f"canonical reference does not match group pattern: {record.block_id!r}"
+                f"{location}: source group capture {value!r} has no mapping"
             )
-        captured = match.group(1)
-        if captured is None:
+        return spec.source_map[value]
+    group = _capture_key(value, spec.capture_kind, location)
+    if spec.source_offset:
+        try:
+            number = int(group) + spec.source_offset
+        except ValueError as error:
             raise EpubBlocksError(
-                "canonical-reference group capture did not participate for "
-                f"{record.block_id!r}"
-            )
-        if not captured:
+                f"{location}: source_offset requires a numeric capture"
+            ) from error
+        if number < 1:
+            raise EpubBlocksError(f"{location}: maps to invalid group {number}")
+        group = str(number)
+    if spec.capture_width is not None:
+        try:
+            number = int(group)
+        except ValueError as error:
             raise EpubBlocksError(
-                f"canonical-reference group capture is empty for {record.block_id!r}"
-            )
-        if captured in spec.reference_map:
-            group = spec.reference_map[captured]
-        else:
-            group = _capture_key(
-                captured,
-                spec.reference_capture_kind,
-                f"canonical reference {record.block_id!r}",
-            )
-        grouped[group].append(record)
-    return dict(grouped)
+                f"{location}: capture_width requires a numeric group"
+            ) from error
+        group = f"{number:0{spec.capture_width}d}"
+    return group
 
 
-def _group_sources(
-    records: Sequence[TextBlock],
-    spec: _GroupSpec,
-    reference_group_order: Sequence[str],
-) -> dict[str, list[TextBlock]]:
-    if spec.source_pattern is None and spec.source_marker is None:
-        return {"": list(records)}
+def _source_groups(
+    records: Sequence[TextBlock], spec: _GroupSpec
+) -> tuple[str | None, ...]:
+    if (
+        spec.source_pattern is None
+        and spec.source_marker is None
+        and not spec.transitions
+    ):
+        return tuple("" for _record in records)
 
-    if spec.source_marker is not None:
-        marker = spec.source_marker
-        flags = re.IGNORECASE if marker.case_insensitive else 0
-        expression = re.compile(marker.pattern, flags)
-        order = {group: index for index, group in enumerate(reference_group_order)}
-        grouped: dict[str, list[TextBlock]] = defaultdict(list)
-        current: str | None = None
-        seen: set[str] = set()
-        last_index = -1
+    candidate_locators = Counter(record.locator for record in records)
+    missing_transitions = sorted(
+        locator for locator in spec.transitions if candidate_locators[locator] == 0
+    )
+    if missing_transitions:
+        names = ", ".join(repr(locator) for locator in missing_transitions)
+        raise EpubBlocksError(
+            f"output.groups.transitions: locator(s) are not selected source "
+            f"candidates: {names}"
+        )
+    ambiguous_transitions = sorted(
+        locator for locator in spec.transitions if candidate_locators[locator] > 1
+    )
+    if ambiguous_transitions:
+        names = ", ".join(repr(locator) for locator in ambiguous_transitions)
+        raise EpubBlocksError(
+            f"output.groups.transitions: locator(s) are ambiguous: {names}"
+        )
+
+    if spec.source_pattern is not None:
+        expression = re.compile(spec.source_pattern, re.IGNORECASE)
+        result: list[str] = []
         for record in records:
-            match = expression.match(record.text)
-            if match is not None:
-                captured = match.group(1)
-                if captured is None or not captured:
-                    raise EpubBlocksError(
-                        f"source-marker capture is empty for {record.source_locator!r}"
-                    )
-                if captured in spec.source_map:
-                    group = spec.source_map[captured]
-                else:
-                    group = _capture_key(
-                        captured,
-                        marker.capture_kind,
-                        f"source marker {record.source_locator!r}",
-                    )
-                    if spec.source_offset:
-                        try:
-                            numeric_group = int(group) + spec.source_offset
-                        except ValueError as error:
-                            raise EpubBlocksError(
-                                "source_offset requires a numeric source-marker capture"
-                            ) from error
-                        if numeric_group < 1:
-                            raise EpubBlocksError(
-                                f"source marker maps to invalid group {numeric_group}: "
-                                f"{record.source_locator!r}"
-                            )
-                        group = str(numeric_group)
-                if group in seen:
-                    raise EpubBlocksError(
-                        f"source marker repeats group {group!r}: "
-                        f"{record.source_locator!r}"
-                    )
-                if group not in order:
-                    raise EpubBlocksError(
-                        f"source marker establishes unknown group {group!r}: "
-                        f"{record.source_locator!r}"
-                    )
-                group_index = order[group]
-                if group_index <= last_index:
-                    raise EpubBlocksError(
-                        f"source marker moves backward to group {group!r}: "
-                        f"{record.source_locator!r}"
-                    )
-                current = group
-                seen.add(group)
-                last_index = group_index
-            if current is None:
+            match = expression.search(record.source_locator)
+            if match is None:
                 raise EpubBlocksError(
-                    "source block occurs before the first source marker: "
+                    "source block does not match output group pattern: "
                     f"{record.source_locator!r}"
                 )
-            grouped[current].append(record)
-        return dict(grouped)
+            captured = match.group(1)
+            if captured is None:
+                raise EpubBlocksError(
+                    "source group capture did not participate for "
+                    f"{record.source_locator!r}"
+                )
+            result.append(_captured_group(captured, spec, record.source_locator))
+        return tuple(result)
 
-    if spec.source_pattern is None:
-        raise AssertionError("validated source grouping mechanism is missing")
-    expression = re.compile(spec.source_pattern, re.IGNORECASE)
-    grouped: dict[str, list[TextBlock]] = defaultdict(list)
+    marker_expression: re.Pattern[str] | None = None
+    if spec.source_marker is not None:
+        flags = re.IGNORECASE if spec.source_marker.case_insensitive else 0
+        marker_expression = re.compile(spec.source_marker.pattern, flags)
+
+    result_optional: list[str | None] = []
+    current: str | None = None
+    seen_markers: set[str] = set()
     for record in records:
-        match = expression.search(record.source_locator)
-        if not match:
-            raise EpubBlocksError(
-                f"source block does not match group pattern: {record.source_locator!r}"
-            )
-        captured = match.group(1)
-        if captured is None:
-            raise EpubBlocksError(
-                "source group capture did not participate for "
-                f"{record.source_locator!r}"
-            )
-        if spec.source_map:
-            if captured not in spec.source_map:
-                raise EpubBlocksError(f"source group {captured!r} has no mapping")
-            group = spec.source_map[captured]
-        else:
-            try:
-                numeric_group = int(captured) + spec.source_offset
-            except ValueError as error:
-                if spec.source_offset:
+        transition = spec.transitions.get(record.locator)
+        if transition is not None:
+            current = transition
+        if marker_expression is not None:
+            match = marker_expression.match(record.text)
+            if match is not None:
+                captured = match.group(1)
+                if captured is None:
                     raise EpubBlocksError(
-                        "source group must be a decimal integer for "
-                        f"{record.source_locator!r}"
-                    ) from error
-                group = captured
-            else:
-                if numeric_group < 1:
-                    raise EpubBlocksError(
-                        f"source block maps to invalid group {numeric_group}: "
+                        f"source-marker capture did not participate for "
                         f"{record.source_locator!r}"
                     )
-                group = str(numeric_group)
-        grouped[group].append(record)
-    return dict(grouped)
+                current = _captured_group(captured, spec, record.source_locator)
+                if current in seen_markers:
+                    raise EpubBlocksError(
+                        f"source marker repeats group {current!r}: "
+                        f"{record.source_locator!r}"
+                    )
+                seen_markers.add(current)
+        result_optional.append(current)
+    return tuple(result_optional)
 
 
 def _fragment_from_block(block: TextBlock) -> Fragment:
@@ -1058,29 +1212,148 @@ def _apply_prefix_rule(
     )
 
 
+def _rule_matches(block: TextBlock, spec: _MatchSpec) -> bool:
+    if spec.tag is not None and block.tag.casefold() != spec.tag.casefold():
+        return False
+    if spec.classes is not None and block.classes != spec.classes:
+        return False
+    if spec.classes_any and block.classes.isdisjoint(spec.classes_any):
+        return False
+    if spec.classes_all and not spec.classes_all.issubset(block.classes):
+        return False
+    if spec.locators and not matches(block.locator, spec.locators):
+        return False
+    if spec.text_pattern is not None:
+        flags = re.IGNORECASE if spec.case_insensitive else 0
+        if re.search(spec.text_pattern, block.text, flags) is None:
+            return False
+    return True
+
+
+class _IdentifierAllocator:
+    def __init__(self, spec: _IdentifierSpec) -> None:
+        self.spec = spec
+        self.next_blocks: dict[str, int] = defaultdict(lambda: spec.block_start)
+        self.line_blocks: dict[str, int] = {}
+        self.next_lines: dict[str, int] = {}
+        self.seen: set[str] = set()
+
+    @staticmethod
+    def _render(template: str, values: Mapping[str, object], location: str) -> str:
+        try:
+            result = template.format_map(values)
+        except (KeyError, ValueError, OverflowError) as error:
+            raise EpubBlocksError(
+                f"{location}: identifier template could not be rendered: {error}"
+            ) from error
+        if not result:
+            raise EpubBlocksError(f"{location}: identifier template rendered empty")
+        return result
+
+    def allocate(
+        self,
+        emission: _EmissionSpec,
+        group: str,
+        location: str,
+        *,
+        preserve_line_state: bool = False,
+    ) -> str:
+        if emission.role == "fixed":
+            if emission.block_id is None:
+                raise AssertionError("fixed emission validated with an identifier")
+            block_id = self._render(emission.block_id, {"group": group}, location)
+            if not preserve_line_state:
+                self.line_blocks.pop(group, None)
+                self.next_lines.pop(group, None)
+        elif emission.role == "block":
+            number = self.next_blocks[group]
+            self.next_blocks[group] += 1
+            block_id = self._render(
+                self.spec.block_template,
+                {"group": group, "number": number},
+                location,
+            )
+            self.line_blocks.pop(group, None)
+            self.next_lines.pop(group, None)
+        elif emission.role == "line-start":
+            if self.spec.line_template is None:
+                raise AssertionError("line template required during parsing")
+            block = self.next_blocks[group]
+            self.next_blocks[group] += 1
+            number = self.spec.line_start
+            self.line_blocks[group] = block
+            self.next_lines[group] = number + 1
+            block_id = self._render(
+                self.spec.line_template,
+                {"group": group, "block": block, "number": number},
+                location,
+            )
+        else:
+            if self.spec.line_template is None:
+                raise AssertionError("line template required during parsing")
+            if group not in self.line_blocks:
+                raise EpubBlocksError(
+                    f"{location}: line role has no preceding line-start in group "
+                    f"{group!r}"
+                )
+            block = self.line_blocks[group]
+            number = self.next_lines[group]
+            self.next_lines[group] += 1
+            block_id = self._render(
+                self.spec.line_template,
+                {"group": group, "block": block, "number": number},
+                location,
+            )
+        if block_id in self.seen:
+            raise EpubBlocksError(
+                f"{location}: duplicate generated identifier {block_id!r}"
+            )
+        self.seen.add(block_id)
+        return block_id
+
+
+def _compiled_produced_block(
+    produced: _ProducedBlockSpec,
+    allocator: _IdentifierAllocator,
+    group: str,
+    location: str,
+    *,
+    consumed_locators: tuple[str, ...] = (),
+    preserve_line_state: bool = False,
+) -> CompiledBlock:
+    block_id = allocator.allocate(
+        produced.emission, group, location, preserve_line_state=preserve_line_state
+    )
+    return CompiledBlock(
+        block_id,
+        produced.emission.block_type,
+        produced.parts,
+        produced.separator,
+        consumed_locators,
+    )
+
+
 def _compile_blocks(
-    references: Sequence[BlockReference],
     candidates: Sequence[TextBlock],
     spec: _RecipeSpec,
 ) -> tuple[tuple[CompiledBlock, ...], tuple[str, ...], tuple[str, ...]]:
-    overrides = spec.mapping.overrides
-    known_reference_ids = {reference.block_id for reference in references}
-    unknown_overrides = sorted(set(overrides) - known_reference_ids)
-    if unknown_overrides:
-        names = ", ".join(repr(name) for name in unknown_overrides)
-        raise EpubBlocksError(f"mapping overrides unknown reference(s): {names}")
-
+    output = spec.output
+    replacements = {
+        replacement.anchor: replacement for replacement in output.replacements
+    }
+    insertions = {insertion.after: insertion for insertion in output.insertions}
     reserved = {
         _fragment_locator(part)
-        for override in overrides.values()
-        for part in override.parts
+        for replacement in output.replacements
+        for produced in replacement.outputs
+        for part in produced.parts
     }
-    skipped = set(spec.mapping.skip_source)
+    skipped = set(output.skip_source)
     collisions = sorted(skipped & reserved)
     if collisions:
         names = ", ".join(repr(locator) for locator in collisions)
         raise EpubBlocksError(
-            "mapping source locators are both skipped and reserved: " + names
+            "output source locators are both skipped and reserved: " + names
         )
     candidate_locator_counts = Counter(block.locator for block in candidates)
     missing_skips = sorted(
@@ -1089,8 +1362,7 @@ def _compile_blocks(
     if missing_skips:
         names = ", ".join(repr(locator) for locator in missing_skips)
         raise EpubBlocksError(
-            "mapping skip_source locator(s) are not selected source candidates: "
-            + names
+            "output.skip_source locator(s) are not selected source candidates: " + names
         )
     ambiguous_skips = sorted(
         locator for locator in skipped if candidate_locator_counts[locator] > 1
@@ -1098,8 +1370,35 @@ def _compile_blocks(
     if ambiguous_skips:
         names = ", ".join(repr(locator) for locator in ambiguous_skips)
         raise EpubBlocksError(
-            "mapping skip_source locator(s) do not identify exactly one selected "
+            "output.skip_source locator(s) do not identify exactly one selected "
             f"source candidate: {names}"
+        )
+    anchors = set(replacements) | set(insertions)
+    missing_anchors = sorted(
+        locator for locator in anchors if candidate_locator_counts[locator] == 0
+    )
+    if missing_anchors:
+        names = ", ".join(repr(locator) for locator in missing_anchors)
+        raise EpubBlocksError(
+            f"output anchor locator(s) are not selected source candidates: {names}"
+        )
+    ambiguous_anchors = sorted(
+        locator for locator in anchors if candidate_locator_counts[locator] > 1
+    )
+    if ambiguous_anchors:
+        names = ", ".join(repr(locator) for locator in ambiguous_anchors)
+        raise EpubBlocksError(f"output anchor locator(s) are ambiguous: {names}")
+    anchor_skip_collisions = sorted(anchors & skipped)
+    if anchor_skip_collisions:
+        names = ", ".join(repr(locator) for locator in anchor_skip_collisions)
+        raise EpubBlocksError(f"output anchor locator(s) are also skipped: {names}")
+    missing_reserved = sorted(
+        locator for locator in reserved if candidate_locator_counts[locator] == 0
+    )
+    if missing_reserved:
+        names = ", ".join(repr(locator) for locator in missing_reserved)
+        raise EpubBlocksError(
+            f"output replacement locator(s) are not selected source candidates: {names}"
         )
     ambiguous_reserved = sorted(
         locator for locator in reserved if candidate_locator_counts[locator] > 1
@@ -1107,115 +1406,160 @@ def _compile_blocks(
     if ambiguous_reserved:
         names = ", ".join(repr(locator) for locator in ambiguous_reserved)
         raise EpubBlocksError(
-            "mapping override locator(s) identify more than one selected source "
+            "output replacement locator(s) identify more than one selected source "
             f"candidate: {names}"
         )
+    groups = _source_groups(candidates, output.groups)
+    allocator = _IdentifierAllocator(output.identifiers)
+    compiled: list[CompiledBlock] = []
+    handled_insertions: set[str] = set()
 
-    reference_groups = _group_references(references, spec.mapping.groups)
-    grouped_candidates = _group_sources(
-        candidates,
-        spec.mapping.groups,
-        tuple(reference_groups),
-    )
-    source_groups = {
-        group: available
-        for group, blocks in grouped_candidates.items()
-        if (
-            available := [
-                block for block in blocks if block.locator not in skipped | reserved
-            ]
-        )
-    }
-    extra_source_groups = sorted(set(source_groups) - set(reference_groups))
-    if extra_source_groups:
-        raise EpubBlocksError(
-            "reference and source group sets differ: unexpected source group(s) "
-            + ", ".join(repr(group) for group in extra_source_groups)
-        )
-    missing_source_groups = [
-        group
-        for group, group_references in reference_groups.items()
-        if group not in source_groups
-        and any(reference.block_id not in overrides for reference in group_references)
-    ]
-    if missing_source_groups:
-        raise EpubBlocksError(
-            "reference and source group sets differ: missing source group(s) "
-            + ", ".join(repr(group) for group in missing_source_groups)
-        )
-
-    compiled_by_id: dict[str, CompiledBlock] = {}
-    for group, group_references in reference_groups.items():
-        source = source_groups.get(group, [])
-        cursor = 0
-        for reference in group_references:
-            override = overrides.get(reference.block_id)
-            if override is not None:
-                compiled_by_id[reference.block_id] = CompiledBlock(
-                    reference.block_id,
-                    reference.block_type,
-                    override.parts,
-                    override.separator,
-                    (),
-                )
-                continue
-
-            rule = spec.mapping.type_rules.get(reference.block_type)
-            consume = rule.consume if rule is not None else 1
-            available = len(source) - cursor
-            if available < consume:
-                raise EpubBlocksError(
-                    f"group {group!r}: reference {reference.block_id!r} needs "
-                    f"{consume} source blocks, found {available}"
-                )
-            used = source[cursor : cursor + consume]
-            emit = (
-                rule.emit
-                if rule is not None and rule.emit is not None
-                else tuple(range(1, consume + 1))
+    def require_group(index: int, location: str) -> str:
+        group = groups[index]
+        if group is None:
+            raise EpubBlocksError(
+                f"{location}: source block occurs before the first group marker or "
+                "transition"
             )
-            emitted = [used[index - 1] for index in emit]
-            parts = tuple(_fragment_from_block(block) for block in emitted)
-            if rule is not None and rule.remove_prefix is not None:
-                if len(emitted) != 1:
-                    raise AssertionError(
-                        "remove_prefix emit count validated during parsing"
+        return group
+
+    def add_insertions(locator: str, group: str) -> None:
+        insertion = insertions.get(locator)
+        if insertion is None:
+            return
+        for output_index, produced in enumerate(insertion.outputs, 1):
+            compiled.append(
+                _compiled_produced_block(
+                    produced,
+                    allocator,
+                    group,
+                    f"insertion after {locator!r}, output {output_index}",
+                    preserve_line_state=True,
+                )
+            )
+        handled_insertions.add(locator)
+
+    cursor = 0
+    while cursor < len(candidates):
+        block = candidates[cursor]
+        locator = block.locator
+        if locator in skipped:
+            cursor += 1
+            continue
+        replacement = replacements.get(locator)
+        if replacement is not None:
+            group = require_group(cursor, f"replacement at {locator!r}")
+            for output_index, produced in enumerate(replacement.outputs, 1):
+                compiled.append(
+                    _compiled_produced_block(
+                        produced,
+                        allocator,
+                        group,
+                        f"replacement at {locator!r}, output {output_index}",
                     )
-                parts = (
-                    _apply_prefix_rule(
-                        emitted[0],
-                        rule.remove_prefix,
-                        location=(f"group {group!r}: reference {reference.block_id!r}"),
-                    ),
                 )
-            separator = (
-                rule.separator
-                if rule is not None and rule.separator is not None
-                else spec.mapping.join_separator
-                if len(parts) > 1
-                else ""
+            add_insertions(locator, group)
+            cursor += 1
+            continue
+        if locator in reserved:
+            cursor += 1
+            continue
+
+        rule = next(
+            (
+                candidate
+                for candidate in output.rules
+                if _rule_matches(block, candidate.match)
+            ),
+            None,
+        )
+        emission = rule.emission if rule is not None else output.default
+        consume = rule.consume if rule is not None else 1
+        if cursor + consume > len(candidates):
+            raise EpubBlocksError(
+                f"source rule at {block.source_locator!r} needs {consume} blocks, "
+                f"found {len(candidates) - cursor}"
             )
-            compiled_by_id[reference.block_id] = CompiledBlock(
-                reference.block_id,
-                reference.block_type,
+        used = candidates[cursor : cursor + consume]
+        used_groups = groups[cursor : cursor + consume]
+        unavailable = [
+            item.locator
+            for item in used
+            if item.locator in skipped
+            or item.locator in reserved
+            or item.locator in replacements
+        ]
+        if unavailable:
+            names = ", ".join(repr(item) for item in unavailable)
+            raise EpubBlocksError(
+                f"source rule at {block.source_locator!r} consumes specially handled "
+                f"source block(s): {names}"
+            )
+        group = require_group(cursor, f"source rule at {block.source_locator!r}")
+        if any(candidate_group != group for candidate_group in used_groups):
+            raise EpubBlocksError(
+                f"source rule at {block.source_locator!r} crosses an output group"
+            )
+        internal_insertions = [
+            item.locator for item in used[:-1] if item.locator in insertions
+        ]
+        if internal_insertions:
+            names = ", ".join(repr(item) for item in internal_insertions)
+            raise EpubBlocksError(
+                f"source rule at {block.source_locator!r} crosses insertion "
+                f"anchor(s): {names}"
+            )
+        emit = (
+            rule.emit
+            if rule is not None and rule.emit is not None
+            else tuple(range(1, consume + 1))
+        )
+        emitted = [used[index - 1] for index in emit]
+        if used[-1].locator in insertions and used[-1] not in emitted:
+            raise EpubBlocksError(
+                f"source rule at {block.source_locator!r} discards insertion "
+                f"anchor {used[-1].locator!r}; the anchor must be emitted"
+            )
+        parts = tuple(_fragment_from_block(item) for item in emitted)
+        if rule is not None and rule.remove_prefix is not None:
+            parts = (
+                _apply_prefix_rule(
+                    emitted[0],
+                    rule.remove_prefix,
+                    location=f"source rule at {block.source_locator!r}",
+                ),
+            )
+        separator = (
+            rule.separator
+            if rule is not None and rule.separator is not None
+            else " "
+            if len(parts) > 1
+            else ""
+        )
+        block_id = allocator.allocate(
+            emission,
+            group,
+            f"source rule at {block.source_locator!r}",
+        )
+        compiled.append(
+            CompiledBlock(
+                block_id,
+                emission.block_type,
                 parts,
                 separator,
-                tuple(block.locator for block in used),
+                tuple(item.locator for item in used),
             )
-            cursor += consume
-        if cursor != len(source):
-            remaining = ", ".join(
-                block.source_locator for block in source[cursor : cursor + 3]
-            )
-            raise EpubBlocksError(
-                f"group {group!r}: {len(source) - cursor} unmapped source "
-                f"block(s), beginning with {remaining}"
-            )
-    return (
-        tuple(compiled_by_id[reference.block_id] for reference in references),
-        tuple(sorted(skipped)),
-        tuple(sorted(reserved)),
-    )
+        )
+        add_insertions(used[-1].locator, group)
+        cursor += consume
+
+    missing_insertions = sorted(set(insertions) - handled_insertions)
+    if missing_insertions:
+        names = ", ".join(repr(locator) for locator in missing_insertions)
+        raise EpubBlocksError(f"output insertion anchor(s) were not emitted: {names}")
+    if not compiled:
+        raise EpubBlocksError("recipe generated no output blocks")
+    return tuple(compiled), tuple(sorted(skipped)), tuple(sorted(reserved))
 
 
 def _fragment_digest_value(fragment: Fragment, location: str) -> dict[str, object]:
@@ -1408,28 +1752,18 @@ def _extract_joined_parts(
 def _prepare_recipe(
     epub_path: StrPath,
     recipe: Mapping[str, object],
-    base_dir: StrPath | None,
     recipe_location: str,
     *,
     verify_digest: bool,
-) -> tuple[Path, _RecipeSpec, list[BlockReference]]:
+) -> tuple[Path, _RecipeSpec]:
     path = Path(epub_path)
     spec = _parse_recipe(recipe, recipe_location, require_compiled_hash=verify_digest)
-    references = _read_references(spec.references, base_dir)
-    reference_types = {reference.block_type for reference in references}
-    unknown_type_rules = sorted(set(spec.mapping.type_rules) - reference_types)
-    if unknown_type_rules:
-        names = ", ".join(repr(name) for name in unknown_type_rules)
-        raise EpubBlocksError(
-            f"{recipe_location}.mapping.type_rules: unknown reference type(s): {names}"
-        )
-    return path, spec, references
+    return path, spec
 
 
 def _compile_from_epub(
     path: Path,
     spec: _RecipeSpec,
-    references: Sequence[BlockReference],
     epub: EpubArchive,
     package: EpubPackage,
     document_cache: dict[str, XmlElement],
@@ -1455,17 +1789,22 @@ def _compile_from_epub(
         normalization=spec.normalization,
         document_cache=document_cache,
     )
-    for block_id, override in spec.mapping.overrides.items():
-        _extract_joined_parts(
-            epub,
-            override.parts,
-            override.separator,
-            spec.normalization,
-            spec.omitted_types,
-            document_cache,
-            location=f"mapping override {block_id!r}",
-        )
-    blocks, skipped, reserved = _compile_blocks(references, candidates, spec)
+    for category, special_outputs in (
+        ("replacement", spec.output.replacements),
+        ("insertion", spec.output.insertions),
+    ):
+        for item_index, item in enumerate(special_outputs, 1):
+            for output_index, produced in enumerate(item.outputs, 1):
+                _extract_joined_parts(
+                    epub,
+                    produced.parts,
+                    produced.separator,
+                    spec.normalization,
+                    spec.omitted_types,
+                    document_cache,
+                    location=(f"output {category} {item_index}, output {output_index}"),
+                )
+    blocks, skipped, reserved = _compile_blocks(candidates, spec)
     compiled = CompiledRecipe(
         spec.identifier,
         spec.sha256,
@@ -1476,10 +1815,10 @@ def _compile_from_epub(
         reserved,
     )
     actual_digest = compiled_recipe_digest(compiled)
-    if verify_digest and spec.mapping.compiled_sha256 != actual_digest:
+    if verify_digest and spec.output.compiled_sha256 != actual_digest:
         raise EpubBlocksError(
-            "mapping compiled SHA-256 does not match: "
-            f"expected {spec.mapping.compiled_sha256!r}, found {actual_digest!r}"
+            "output compiled SHA-256 does not match: "
+            f"expected {spec.output.compiled_sha256!r}, found {actual_digest!r}"
         )
     return compiled
 
@@ -1488,17 +1827,15 @@ def compile_recipe(
     epub_path: StrPath,
     recipe: Mapping[str, object],
     *,
-    base_dir: StrPath | None = None,
     recipe_location: str = "recipe",
     verify_digest: bool = True,
     limits: SafetyLimits = DEFAULT_SAFETY_LIMITS,
 ) -> CompiledRecipe:
     """Compile a strictly validated version 1 recipe into an extraction plan."""
 
-    path, spec, references = _prepare_recipe(
+    path, spec = _prepare_recipe(
         epub_path,
         recipe,
-        base_dir,
         recipe_location,
         verify_digest=verify_digest,
     )
@@ -1516,7 +1853,6 @@ def compile_recipe(
             return _compile_from_epub(
                 path,
                 spec,
-                references,
                 epub,
                 package,
                 {},
@@ -1537,7 +1873,6 @@ def compile_recipe_file(
     return compile_recipe(
         epub_path,
         load_recipe(recipe_file),
-        base_dir=recipe_file.parent,
         recipe_location=str(recipe_file),
         verify_digest=verify_digest,
         limits=limits,
@@ -1571,16 +1906,14 @@ def extract_recipe(
     epub_path: StrPath,
     recipe: Mapping[str, object],
     *,
-    base_dir: StrPath | None = None,
     recipe_location: str = "recipe",
     limits: SafetyLimits = DEFAULT_SAFETY_LIMITS,
 ) -> list[ExtractedBlock]:
     """Compile and apply a strictly validated version 1 extraction recipe."""
 
-    path, spec, references = _prepare_recipe(
+    path, spec = _prepare_recipe(
         epub_path,
         recipe,
-        base_dir,
         recipe_location,
         verify_digest=True,
     )
@@ -1599,7 +1932,6 @@ def extract_recipe(
             compiled = _compile_from_epub(
                 path,
                 spec,
-                references,
                 epub,
                 package,
                 cache,
@@ -1625,7 +1957,6 @@ def extract_recipe_file(
     return extract_recipe(
         epub_path,
         load_recipe(recipe_file),
-        base_dir=recipe_file.parent,
         recipe_location=str(recipe_file),
         limits=limits,
     )

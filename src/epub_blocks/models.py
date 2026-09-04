@@ -46,14 +46,6 @@ class Fragment:
 
 
 @dataclass(frozen=True)
-class BlockReference:
-    """The canonical identifier and type assigned to one output block."""
-
-    block_id: str
-    block_type: str
-
-
-@dataclass(frozen=True)
 class CompiledBlock:
     """One output block in a compiled extraction plan."""
 
@@ -99,7 +91,7 @@ class TextBlock:
 
 @dataclass(frozen=True)
 class ExtractedBlock:
-    """One canonical-reference/type/text record produced by a recipe."""
+    """One identifier/type/text record produced by a recipe."""
 
     block_id: str
     block_type: str

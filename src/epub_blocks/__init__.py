@@ -5,7 +5,6 @@ from importlib.metadata import version
 from .errors import EpubBlocksError
 from .extract import extract_blocks, extract_fragments
 from .models import (
-    BlockReference,
     CompiledBlock,
     CompiledRecipe,
     EpubPackage,
@@ -30,7 +29,6 @@ from .safety import SafetyLimits
 __version__ = version("epub-blocks")
 
 __all__ = [
-    "BlockReference",
     "CompiledBlock",
     "CompiledRecipe",
     "EpubBlocksError",

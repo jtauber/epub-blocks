@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "epub-blocks"
-version = "0.2.0"
+version = "0.3.0"
 description = "Recipe-driven extraction of structured text blocks from EPUB files"
 readme = "README.md"
 requires-python = ">=3.13"
