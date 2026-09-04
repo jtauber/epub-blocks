@@ -104,8 +104,7 @@ class EpubArchive:
             )
         if (
             name not in self._read_members
-            and self._bytes_read + member.file_size
-            > self.limits.max_total_read_bytes
+            and self._bytes_read + member.file_size > self.limits.max_total_read_bytes
         ):
             raise EpubBlocksError(
                 "EPUB extraction exceeds the total uncompressed read limit"
@@ -118,7 +117,7 @@ class EpubArchive:
         member = self._member(name)
         try:
             data = self._archive.read(member)
-        except (BadZipFile, RuntimeError) as error:
+        except (BadZipFile, NotImplementedError, RuntimeError) as error:
             raise EpubBlocksError(
                 f"EPUB archive member {name!r} could not be read"
             ) from error

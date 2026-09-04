@@ -21,6 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --locked
+      - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run pyright
       - run: uv run coverage run -m unittest discover -s tests
@@ -37,27 +38,50 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run python -m build
-      - run: uv run twine check dist/*
+      - run: uv run twine check --strict dist/*
       - name: Inspect artifacts
         run: |
           python - <<'PY'
           import pathlib
           import tarfile
+          import tomllib
           import zipfile
 
-          source = next(pathlib.Path("dist").glob("*.tar.gz"))
-          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          dist = pathlib.Path("dist")
+          artifacts = sorted(path for path in dist.iterdir() if path.is_file())
+          source_archives = [
+              path for path in artifacts if path.name.endswith(".tar.gz")
+          ]
+          wheels = [path for path in artifacts if path.suffix == ".whl"]
+          assert len(artifacts) == 2
+          assert len(source_archives) == 1
+          assert len(wheels) == 1
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          version = project["project"]["version"]
+          source = source_archives[0]
+          wheel = wheels[0]
+          assert source.name == f"epub_blocks-{version}.tar.gz"
+          assert wheel.name == f"epub_blocks-{version}-py3-none-any.whl"
           with tarfile.open(source) as archive:
               names = archive.getnames()
               assert any(name.endswith("/docs/recipe-format.md") for name in names)
-              assert any(name.endswith("/schemas/recipe-v1.schema.json") for name in names)
+              assert any(name.endswith("/epub_blocks/py.typed") for name in names)
+              assert any(
+                  name.endswith("/epub_blocks/schemas/recipe-v1.schema.json")
+                  for name in names
+              )
           with zipfile.ZipFile(wheel) as archive:
               assert "epub_blocks/py.typed" in archive.namelist()
+              assert (
+                  "epub_blocks/schemas/recipe-v1.schema.json"
+                  in archive.namelist()
+              )
           PY
       - name: Test the built wheel
         run: |
           uv venv --python 3.13 .wheel-venv
-          uv pip install --python .wheel-venv/bin/python dist/*.whl
+          uv pip install --python .wheel-venv/bin/python --no-deps dist/*.whl
           .wheel-venv/bin/epub-blocks --version
       - uses: actions/upload-artifact@v7.0.1
         with:

@@ -46,6 +46,38 @@ class Fragment:
 
 
 @dataclass(frozen=True)
+class BlockReference:
+    """The canonical identifier and type assigned to one output block."""
+
+    block_id: str
+    block_type: str
+
+
+@dataclass(frozen=True)
+class CompiledBlock:
+    """One output block in a compiled extraction plan."""
+
+    block_id: str
+    block_type: str
+    parts: tuple[Fragment, ...]
+    separator: str = ""
+    consumed_locators: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompiledRecipe:
+    """The deterministic extraction plan produced from a version 1 recipe."""
+
+    epub_identifier: str
+    epub_sha256: str
+    normalization: NormalizationOptions
+    omit_epub_types: frozenset[str]
+    blocks: tuple[CompiledBlock, ...]
+    skipped_locators: tuple[str, ...] = ()
+    reserved_locators: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TextBlock:
     """An extracted XHTML block with a stable source locator."""
 
@@ -67,7 +99,7 @@ class TextBlock:
 
 @dataclass(frozen=True)
 class ExtractedBlock:
-    """One recipe-produced text record."""
+    """One canonical-reference/type/text record produced by a recipe."""
 
     block_id: str
     block_type: str

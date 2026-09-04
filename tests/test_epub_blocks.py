@@ -9,18 +9,31 @@ import tempfile
 import unicodedata
 import unittest
 from collections.abc import Iterator
+from importlib.resources import files
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
 
+from jsonschema import (  # pyright: ignore[reportMissingModuleSource]
+    Draft202012Validator,
+)
+
 from epub_blocks import (
+    BlockReference,
+    CompiledBlock,
+    CompiledRecipe,
     EpubBlocksError,
     ExtractedBlock,
+    Fragment,
     NormalizationOptions,
     SafetyLimits,
     __version__,
+    compile_recipe,
+    compile_recipe_file,
+    compiled_recipe_digest,
     extract_blocks,
+    extract_fragments,
     extract_recipe,
     extract_recipe_file,
     inspect_epub,
@@ -28,7 +41,6 @@ from epub_blocks import (
     write_tsv,
 )
 from epub_blocks.cli import main
-from epub_blocks.models import Fragment
 from epub_blocks.package import matches, select_spine_documents
 from epub_blocks.safety import EpubArchive
 from epub_blocks.xhtml import (
@@ -120,9 +132,7 @@ def make_epub(
     }
     with ZipFile(epub_path, "w") as epub:
         epub.writestr("mimetype", "application/epub+zip", compress_type=ZIP_STORED)
-        epub.writestr(
-            "META-INF/container.xml", container, compress_type=ZIP_DEFLATED
-        )
+        epub.writestr("META-INF/container.xml", container, compress_type=ZIP_DEFLATED)
         epub.writestr("content.opf", package, compress_type=ZIP_DEFLATED)
         for name, value in document_values.items():
             epub.writestr(name, value, compress_type=ZIP_DEFLATED)
@@ -131,24 +141,67 @@ def make_epub(
     return epub_path
 
 
-def minimal_recipe(**overrides: object) -> dict[str, object]:
+def write_references(
+    path: Path,
+    rows: list[tuple[str, str]],
+    *,
+    header: tuple[str, str] = ("id", "type"),
+) -> str:
+    content = "\t".join(header) + "\n"
+    content += "".join(f"{block_id}\t{block_type}\n" for block_id, block_type in rows)
+    path.write_text(content, encoding="utf-8")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def minimal_recipe(
+    *,
+    epub_sha256: str = "0" * 64,
+    references_path: str = "references.tsv",
+    references_sha256: str = "0" * 64,
+    **overrides: object,
+) -> dict[str, object]:
     recipe: dict[str, object] = {
         "recipe_version": "1",
-        "blocks": [
-            {
-                "id": "01.001",
-                "type": "{p}",
-                "parts": [
-                    {
-                        "document": "text/chapter.xhtml",
-                        "element_path": "2",
-                    }
-                ],
-            }
-        ],
+        "epub": {"identifier": "sample-edition", "sha256": epub_sha256},
+        "references": {
+            "path": references_path,
+            "sha256": references_sha256,
+        },
+        "normalization": {
+            "collapse_whitespace": True,
+            "strip": True,
+            "unicode_normalization": "NFC",
+        },
+        "omit_epub_types": ["noteref", "pagebreak"],
+        "source_blocks": {
+            "include_documents": ["text/chapter.xhtml"],
+            "exclude_documents": [],
+            "exclude_classes": [],
+            "include_locators": [],
+            "exclude_locators": [],
+            "include_non_linear": False,
+        },
+        "mapping": {
+            "strategy": "ordered",
+            "groups": {},
+            "join_separator": " ",
+            "type_rules": {},
+            "skip_source": [],
+            "overrides": {},
+            "compiled_sha256": "0" * 64,
+        },
     }
     recipe.update(overrides)
     return recipe
+
+
+def finalize_recipe(
+    epub_path: Path, recipe: dict[str, object], base_dir: Path
+) -> CompiledRecipe:
+    compiled = compile_recipe(epub_path, recipe, base_dir=base_dir, verify_digest=False)
+    mapping = cast(dict[str, object], recipe["mapping"])
+    mapping["compiled_sha256"] = compiled_recipe_digest(compiled)
+    return compiled
 
 
 class ExtractionTests(unittest.TestCase):
@@ -177,6 +230,87 @@ class ExtractionTests(unittest.TestCase):
             self.assertEqual(blocks[2].text, "Nested quotation.")
             self.assertEqual(blocks[0].source_locator, "s001:text/chapter.xhtml#1")
             self.assertEqual(blocks[4].locator, "text/chapter.xhtml#6.1")
+
+    def test_nested_structure_and_explicit_line_breaks(self) -> None:
+        chapter = """<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body><main><section>
+  <h1><span>Part</span><br/>Alpha</h1>
+  <section>
+    <h2>Chapter One</h2>
+    <blockquote>
+      <p class="verse">First line.</p>
+      <p class="verse">Second line.</p>
+    </blockquote>
+    <blockquote><p class="quotation">Quoted paragraph.</p></blockquote>
+    <p class="trailer">Trailer.</p>
+  </section>
+</section></main></body></html>"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(
+                directory,
+                documents={
+                    "text/chapter.xhtml": chapter,
+                    "text/aux.xhtml": AUXILIARY,
+                    "nav.xhtml": NAVIGATION,
+                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                },
+            )
+
+            blocks = extract_blocks(epub_path)
+            self.assertEqual(
+                [(block.tag, block.text) for block in blocks],
+                [
+                    ("h1", "Part Alpha"),
+                    ("h2", "Chapter One"),
+                    ("p", "First line."),
+                    ("p", "Second line."),
+                    ("p", "Quoted paragraph."),
+                    ("p", "Trailer."),
+                ],
+            )
+            self.assertEqual(
+                [block.locator for block in blocks[2:4]],
+                [
+                    "text/chapter.xhtml#1.1.2.2.1",
+                    "text/chapter.xhtml#1.1.2.2.2",
+                ],
+            )
+
+            reference_path = directory / "references.tsv"
+            reference_hash = write_references(
+                reference_path,
+                [
+                    ("part-heading", "heading"),
+                    ("chapter-heading", "heading"),
+                    ("verse-1", "verse-line"),
+                    ("verse-2", "verse-line"),
+                    ("quotation", "quotation"),
+                    ("trailer", "trailer"),
+                ],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            recipe["normalization"] = {
+                "collapse_whitespace": False,
+                "strip": True,
+                "unicode_normalization": "NFC",
+            }
+            finalize_recipe(epub_path, recipe, directory)
+            extracted = extract_recipe(epub_path, recipe, base_dir=directory)
+            self.assertEqual(extracted[0].text, "Part\nAlpha")
+            self.assertEqual(
+                [(block.block_id, block.block_type) for block in extracted[1:]],
+                [
+                    ("chapter-heading", "heading"),
+                    ("verse-1", "verse-line"),
+                    ("verse-2", "verse-line"),
+                    ("quotation", "quotation"),
+                    ("trailer", "trailer"),
+                ],
+            )
 
     def test_non_linear_spine_items_are_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -254,9 +388,7 @@ class ExtractionTests(unittest.TestCase):
                 with self.assertRaisesRegex(EpubBlocksError, "duplicate or overlap"):
                     extract_fragment(
                         epub,
-                        Fragment(
-                            "text/chapter.xhtml", "6.1", omit_paths=("1", "1")
-                        ),
+                        Fragment("text/chapter.xhtml", "6.1", omit_paths=("1", "1")),
                     )
                 with self.assertRaisesRegex(EpubBlocksError, "outside"):
                     extract_fragment(
@@ -317,7 +449,9 @@ class PackageValidationTests(unittest.TestCase):
             for index, (message, container) in enumerate(variants.items()):
                 with self.subTest(message=message):
                     epub_path = make_epub(
-                        directory, filename=f"container-{index}.epub", container=container
+                        directory,
+                        filename=f"container-{index}.epub",
+                        container=container,
                     )
                     with self.assertRaisesRegex(EpubBlocksError, message):
                         inspect_epub(epub_path)
@@ -404,19 +538,170 @@ class PackageValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "positive integer"):
                 SafetyLimits(max_xml_depth=1.5)  # type: ignore[arg-type]
 
+            with ZipFile(epub_path) as archive:
+                bounded = EpubArchive(archive)
+                with (
+                    patch.object(
+                        archive,
+                        "read",
+                        side_effect=NotImplementedError("unsupported compression"),
+                    ),
+                    self.assertRaisesRegex(EpubBlocksError, "could not be read"),
+                ):
+                    bounded.read("mimetype")
+
     def test_xml_declarations_complexity_and_malformed_input(self) -> None:
         self.assertEqual(
             parse_xml(b"<!DOCTYPE html><html/>", "html").tag,
             "html",
         )
+        external = parse_xml(
+            b'<?xml version="1.0"?>\n'
+            b'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" '
+            b'"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n'
+            b"<html><body><p>A&nbsp;&mdash;&nbsp;B &amp; C</p></body></html>",
+            "external-xhtml",
+        )
+        self.assertEqual("".join(external.itertext()), "A\xa0—\xa0B & C")
+        self.assertEqual(
+            parse_xml(
+                b"<!DOCTYPE html SYSTEM 'about:legacy-compat'><html/>",
+                "system-xhtml",
+            ).tag,
+            "html",
+        )
+        cdata = parse_xml(
+            b"<p><![CDATA[<!DOCTYPE html>&nbsp;]]>"
+            b"<span title='&copy;'>&copy;</span></p>",
+            "character-references",
+        )
+        self.assertEqual("".join(cdata.itertext()), "<!DOCTYPE html>&nbsp;©")
+        self.assertEqual(cdata[0].get("title"), "©")
         with self.assertRaisesRegex(EpubBlocksError, "DTD"):
             parse_xml(b"<!DOCTYPE p [<!ENTITY x 'x'>]><p>&x;</p>", "dtd")
+        with self.assertRaisesRegex(EpubBlocksError, "DTD"):
+            parse_xml(
+                b'<!DOCTYPE chapter SYSTEM "local.dtd"><chapter/>',
+                "non-xhtml-dtd",
+            )
+        with self.assertRaisesRegex(EpubBlocksError, "DTD"):
+            parse_xml(b"<!doctype HTML><html/>", "case-invalid-doctype")
+        with self.assertRaisesRegex(EpubBlocksError, "unknown named"):
+            parse_xml(b"<p>&publisherSpecific;</p>", "unknown-entity")
+        expanding_reference = b"<p>&acE;</p>"
+        with self.assertRaisesRegex(EpubBlocksError, "expanded XML.*too large"):
+            parse_xml(
+                expanding_reference,
+                "expanded-reference",
+                SafetyLimits(max_xml_bytes=len(expanding_reference)),
+            )
+        with self.assertRaisesRegex(EpubBlocksError, "multiple XHTML"):
+            parse_xml(
+                b"<!DOCTYPE html><!DOCTYPE html><html/>",
+                "multiple-doctypes",
+            )
+        with self.assertRaisesRegex(EpubBlocksError, "document prolog"):
+            parse_xml(b"<html/><!DOCTYPE html>", "late-doctype")
         with self.assertRaisesRegex(EpubBlocksError, "malformed XML"):
             parse_xml(b"<p>", "bad")
         with self.assertRaisesRegex(EpubBlocksError, "too many elements"):
             parse_xml(b"<p><a/><b/></p>", "wide", SafetyLimits(max_xml_elements=2))
         with self.assertRaisesRegex(EpubBlocksError, "deeply nested"):
             parse_xml(b"<p><a><b/></a></p>", "deep", SafetyLimits(max_xml_depth=2))
+
+    def test_utf16_cannot_bypass_xml_declaration_policy(self) -> None:
+        safe_documents = (
+            (
+                (
+                    '<?xml version="1.0" encoding="UTF-16"?>'
+                    '<!DOCTYPE html SYSTEM "about:legacy-compat">'
+                    "<html><p>A&nbsp;&mdash;&nbsp;B</p></html>"
+                ),
+                "utf-16",
+            ),
+            (
+                (
+                    '<?xml version="1.0" encoding="UTF-16LE"?>'
+                    '<!DOCTYPE html SYSTEM "about:legacy-compat">'
+                    "<html><p>A&nbsp;&mdash;&nbsp;B</p></html>"
+                ),
+                "utf-16-le",
+            ),
+            (
+                (
+                    '<?xml version="1.0" encoding="UTF-16BE"?>'
+                    '<!DOCTYPE html SYSTEM "about:legacy-compat">'
+                    "<html><p>A&nbsp;&mdash;&nbsp;B</p></html>"
+                ),
+                "utf-16-be",
+            ),
+        )
+        for source, encoding in safe_documents:
+            with self.subTest(encoding=encoding):
+                root = parse_xml(source.encode(encoding), encoding)
+                self.assertEqual("".join(root.itertext()), "A\xa0—\xa0B")
+
+        big_endian_with_bom = b"\xfe\xff" + safe_documents[0][0].encode("utf-16-be")
+        root = parse_xml(big_endian_with_bom, "utf-16-big-endian-bom")
+        self.assertEqual("".join(root.itertext()), "A\xa0—\xa0B")
+
+        dangerous = (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            '<!DOCTYPE p [<!ENTITY x "EXPANDED">]><p>&x;</p>'
+        )
+        dangerous_documents = (
+            (dangerous, "utf-16"),
+            (dangerous.replace("UTF-16", "UTF-16LE"), "utf-16-le"),
+            (dangerous.replace("UTF-16", "UTF-16BE"), "utf-16-be"),
+        )
+        for source, encoding in dangerous_documents:
+            with (
+                self.subTest(encoding=encoding),
+                self.assertRaisesRegex(EpubBlocksError, "DTD"),
+            ):
+                parse_xml(source.encode(encoding), encoding)
+
+        dangerous_without_declaration = (
+            ' \n<!DOCTYPE p [<!ENTITY x "EXPANDED">]><p>&x;</p>'
+        )
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with (
+                self.subTest(encoding=f"{encoding}-leading-whitespace"),
+                self.assertRaisesRegex(EpubBlocksError, "DTD"),
+            ):
+                parse_xml(dangerous_without_declaration.encode(encoding), encoding)
+
+        conflicting = (
+            '<?xml version="1.0" encoding="UTF-16BE"?><p>content</p>'
+        ).encode("utf-16-le")
+        with self.assertRaisesRegex(EpubBlocksError, "conflicts"):
+            parse_xml(conflicting, "conflicting-encoding")
+        with self.assertRaisesRegex(EpubBlocksError, "UTF-32"):
+            parse_xml("<p>content</p>".encode("utf-32"), "utf-32")
+        for encoding in ("utf-32-le", "utf-32-be"):
+            with (
+                self.subTest(encoding=f"{encoding}-leading-whitespace"),
+                self.assertRaisesRegex(EpubBlocksError, "NUL"),
+            ):
+                parse_xml((" \n<p>content</p>").encode(encoding), encoding)
+        with self.assertRaisesRegex(EpubBlocksError, "malformed UTF-16"):
+            parse_xml(b"\xff\xfe<", "truncated-utf-16")
+        with self.assertRaisesRegex(EpubBlocksError, "malformed XML"):
+            parse_xml(
+                b'<?xml version="1.0" encoding="UTF-7"?><p>content</p>',
+                "unsupported-multibyte-encoding",
+            )
+
+    def test_declaration_scanning_is_linear_across_opaque_sections(self) -> None:
+        comment = b"<!--<!DOCTYPE html><!ENTITY x 'x'>&copy;-->"
+        root = parse_xml(b"<root>" + comment * 10_000 + b"</root>", "comments")
+        self.assertEqual(root.tag, "root")
+        for opener in (b"<!--", b"<![CDATA[", b"<?"):
+            with (
+                self.subTest(opener=opener),
+                self.assertRaisesRegex(EpubBlocksError, "malformed XML"),
+            ):
+                parse_xml(b"<root>" + opener * 10_000 + b"</root>", "unterminated")
 
     def test_duplicate_and_unsafe_archive_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -443,126 +728,1044 @@ class PackageValidationTests(unittest.TestCase):
 
 
 class RecipeTests(unittest.TestCase):
-    def test_recipe_extracts_joins_slices_and_writes_tsv(self) -> None:
+    def test_packaged_v1_schema_accepts_recipe_and_rejects_unknown_fields(
+        self,
+    ) -> None:
+        schema_path = files("epub_blocks").joinpath("schemas", "recipe-v1.schema.json")
+        schema = cast(
+            dict[str, object], json.loads(schema_path.read_text(encoding="utf-8"))
+        )
+        Draft202012Validator.check_schema(schema)
+        validator = Draft202012Validator(schema)
+        self.assertTrue(
+            validator.is_valid(minimal_recipe())  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        )
+        self.assertFalse(
+            validator.is_valid(minimal_recipe(unknown=True))  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+        )
+
+    def test_public_compiled_models_and_digest(self) -> None:
+        reference = BlockReference("one", "paragraph")
+        self.assertEqual(
+            (reference.block_id, reference.block_type), ("one", "paragraph")
+        )
+        block = CompiledBlock(
+            "one",
+            "paragraph",
+            (Fragment("text/chapter.xhtml", "1"),),
+            "",
+            ("text/chapter.xhtml#1",),
+        )
+        compiled = CompiledRecipe(
+            "edition",
+            "0" * 64,
+            NormalizationOptions(),
+            frozenset(),
+            (block,),
+        )
+        digest = compiled_recipe_digest(compiled)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(digest, compiled_recipe_digest(compiled))
+
+        variants = (
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(strip=False),
+                frozenset(),
+                (block,),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset({"noteref"}),
+                (block,),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (
+                    CompiledBlock(
+                        "one",
+                        "paragraph",
+                        (Fragment("text/chapter.xhtml", "1"),),
+                        "",
+                        ("text/chapter.xhtml#1", "text/chapter.xhtml#2"),
+                    ),
+                ),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (block,),
+                ("text/chapter.xhtml#2",),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (block,),
+                (),
+                ("text/chapter.xhtml#2",),
+            ),
+        )
+        for variant in variants:
+            self.assertNotEqual(digest, compiled_recipe_digest(variant))
+
+        forward_omissions = CompiledRecipe(
+            "edition",
+            "0" * 64,
+            NormalizationOptions(),
+            frozenset(),
+            (
+                CompiledBlock(
+                    "one",
+                    "paragraph",
+                    (Fragment("text/chapter.xhtml", "1", ("1", "2")),),
+                ),
+            ),
+        )
+        reverse_omissions = CompiledRecipe(
+            "edition",
+            "0" * 64,
+            NormalizationOptions(),
+            frozenset(),
+            (
+                CompiledBlock(
+                    "one",
+                    "paragraph",
+                    (Fragment("text/chapter.xhtml", "1", ("2", "1")),),
+                ),
+            ),
+        )
+        self.assertEqual(
+            compiled_recipe_digest(forward_omissions),
+            compiled_recipe_digest(reverse_omissions),
+        )
+
+        invalid_fragments = (
+            Fragment("", "1"),
+            Fragment("text/chapter.xhtml", "+1"),
+            Fragment("text/chapter.xhtml", "1", ("",)),
+            Fragment("text/chapter.xhtml", "1", ("1", "1.2")),
+            Fragment("text/chapter.xhtml", "1", start=0),
+            Fragment("text/chapter.xhtml", "1", start=1, end=1),
+        )
+        for fragment in invalid_fragments:
+            invalid = CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (CompiledBlock("one", "paragraph", (fragment,)),),
+            )
+            with self.assertRaises(EpubBlocksError):
+                compiled_recipe_digest(invalid)
+
+        invalid_compiled = (
+            CompiledRecipe(
+                "edition", "0" * 64, NormalizationOptions(), frozenset(), ()
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (CompiledBlock("one", "p", ()),),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (block,),
+                ("bad",),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (block,),
+                ("text/chapter.xhtml#2",),
+                ("text/chapter.xhtml#2",),
+            ),
+            CompiledRecipe(
+                "edition",
+                "0" * 64,
+                NormalizationOptions(),
+                frozenset(),
+                (
+                    block,
+                    CompiledBlock(
+                        "two",
+                        "p",
+                        (Fragment("text/chapter.xhtml", "2"),),
+                        "",
+                        ("text/chapter.xhtml#1",),
+                    ),
+                ),
+            ),
+        )
+        for invalid in invalid_compiled:
+            with self.assertRaises(EpubBlocksError):
+                compiled_recipe_digest(invalid)
+
+    def test_ordered_mapping_file_apis_and_tsv(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             epub_path = make_epub(directory)
-            recipe = {
-                "recipe_version": "1",
-                "epub": {
-                    "identifier": "sample-edition",
-                    "sha256": hashlib.sha256(epub_path.read_bytes()).hexdigest(),
-                },
-                "normalization": {
-                    "collapse_whitespace": True,
-                    "strip": True,
-                    "unicode_normalization": "NFC",
-                },
-                "omit_epub_types": ["noteref", "pagebreak"],
-                "blocks": [
-                    {
-                        "id": "01.001",
-                        "type": "{h}",
-                        "parts": [
-                            {
-                                "document": "text/chapter.xhtml",
-                                "element_path": "1",
-                            }
-                        ],
-                    },
-                    {
-                        "id": "01.002",
-                        "type": "{p}",
-                        "parts": [
-                            {
-                                "document": "text/chapter.xhtml",
-                                "element_path": "2",
-                            },
-                            {
-                                "document": "text/chapter.xhtml",
-                                "element_path": "6.1",
-                                "omit": ["1"],
-                                "slice": {"start": 0, "end": 11},
-                            },
-                        ],
-                        "separator": " ",
-                    },
+            references_path = directory / "references.tsv"
+            references_hash = write_references(
+                references_path,
+                [("01.000", "{h}"), ("01.001", "{p}")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=references_hash,
+            )
+            source = cast(dict[str, object], recipe["source_blocks"])
+            source["include_locators"] = ["*#1", "*#2"]
+            expected = finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                [block.consumed_locators for block in expected.blocks],
+                [
+                    ("text/chapter.xhtml#1",),
+                    ("text/chapter.xhtml#2",),
                 ],
-            }
-            blocks = extract_recipe(epub_path, recipe)
+            )
+            blocks = extract_recipe(epub_path, recipe, base_dir=directory)
             self.assertEqual(
                 [(block.block_id, block.block_type, block.text) for block in blocks],
                 [
-                    ("01.001", "{h}", "Chapter One"),
-                    ("01.002", "{p}", "One two three. Alpha omega"),
+                    ("01.000", "{h}", "Chapter One"),
+                    ("01.001", "{p}", "One two three."),
                 ],
             )
+
             recipe_path = directory / "recipe.json"
             recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+            self.assertEqual(compile_recipe_file(epub_path, recipe_path), expected)
             self.assertEqual(extract_recipe_file(epub_path, recipe_path), blocks)
 
             output_path = directory / "output" / "records.tsv"
-            write_tsv(output_path, iter(blocks))
+            write_tsv(output_path, blocks)
             self.assertEqual(
                 output_path.read_text(encoding="utf-8"),
-                "01.001\t{h}\tChapter One\n"
-                "01.002\t{p}\tOne two three. Alpha omega\n",
+                "01.000\t{h}\tChapter One\n01.001\t{p}\tOne two three.\n",
             )
 
-    def test_unknown_members_are_rejected_at_each_level(self) -> None:
-        recipes: list[tuple[dict[str, object], str]] = [
-            (minimal_recipe(seperator=" "), "recipe.*seperator"),
-            (
-                minimal_recipe(epub={"identifier": "x", "extra": True}),
-                "recipe.epub.*extra",
-            ),
-            (
-                minimal_recipe(normalization={"trim": True}),
-                "recipe.normalization.*trim",
-            ),
-        ]
-        block = cast(list[object], minimal_recipe()["blocks"])
-        block_value = block[0]
-        assert isinstance(block_value, dict)
-        block_value["extra"] = True
-        recipes.append((minimal_recipe(blocks=block), r"blocks\[1\].*extra"))
+            with self.assertRaisesRegex(EpubBlocksError, "base directory"):
+                compile_recipe(epub_path, recipe)
+            cast(dict[str, object], recipe["references"])["sha256"] = "0" * 64
+            with self.assertRaisesRegex(EpubBlocksError, "reference-index SHA-256"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
 
-        part_recipe = minimal_recipe()
-        parts = cast_dict_list(cast_dict_list(part_recipe["blocks"])[0]["parts"])
-        parts[0]["extra"] = True
-        recipes.append((part_recipe, r"parts\[1\].*extra"))
+    def test_whole_body_override_compiles_digests_and_extracts(self) -> None:
+        chapter = """<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<p>Candidate.</p>
+<div>Body tail.</div>
+</body></html>"""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(
+                directory,
+                documents={
+                    "text/chapter.xhtml": chapter,
+                    "text/aux.xhtml": AUXILIARY,
+                    "nav.xhtml": NAVIGATION,
+                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                },
+            )
+            reference_hash = write_references(
+                directory / "references.tsv",
+                [("whole", "body")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            source = cast(dict[str, object], recipe["source_blocks"])
+            source["include_locators"] = ["*#1"]
+            mapping = cast(dict[str, object], recipe["mapping"])
+            mapping["skip_source"] = ["text/chapter.xhtml#1"]
+            mapping["overrides"] = {
+                "whole": {"parts": [{"document": "text/chapter.xhtml"}]}
+            }
 
-        slice_recipe = minimal_recipe()
-        slice_parts = cast_dict_list(
-            cast_dict_list(slice_recipe["blocks"])[0]["parts"]
+            compiled = finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                compiled.reserved_locators,
+                ("text/chapter.xhtml#",),
+            )
+            self.assertRegex(compiled_recipe_digest(compiled), r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                extract_recipe(epub_path, recipe, base_dir=directory),
+                [ExtractedBlock("whole", "body", "Candidate. Body tail.")],
+            )
+
+    def test_type_rules_consume_emit_join_and_normalize(self) -> None:
+        chapter = (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<h1>CHAPTER ONE</h1><h2>  A Title  </h2>"
+            "<p>  Alpha  </p><p>  Beta  </p>"
+            "</body></html>"
         )
-        slice_parts[0]["slice"] = {"start": 0, "end": 1, "extra": True}
-        recipes.append((slice_recipe, "slice.*extra"))
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(
+                directory,
+                documents={
+                    "text/chapter.xhtml": chapter,
+                    "text/aux.xhtml": AUXILIARY,
+                    "nav.xhtml": NAVIGATION,
+                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                },
+            )
+            reference_hash = write_references(
+                directory / "references.tsv",
+                [("heading", "{h}"), ("paragraph", "{p}")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            recipe["normalization"] = {
+                "collapse_whitespace": False,
+                "strip": True,
+                "unicode_normalization": "NFC",
+            }
+            mapping = cast(dict[str, object], recipe["mapping"])
+            mapping["join_separator"] = "|"
+            mapping["type_rules"] = {
+                "{h}": {"consume": 2, "emit": [2]},
+                "{p}": {"consume": 2},
+            }
+            compiled = finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                compiled.blocks[0].parts, (Fragment("text/chapter.xhtml", "2"),)
+            )
+            self.assertEqual(
+                compiled.blocks[0].consumed_locators,
+                ("text/chapter.xhtml#1", "text/chapter.xhtml#2"),
+            )
+            self.assertEqual(compiled.blocks[1].separator, "|")
+            self.assertEqual(
+                [
+                    block.text
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["A Title", "Alpha|Beta"],
+            )
 
-        for recipe, message in recipes:
+    def test_type_rules_reject_unknown_reference_types(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(directory)
+            reference_hash = write_references(
+                directory / "references.tsv",
+                [("one", "paragraph")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            cast(dict[str, object], recipe["mapping"])["type_rules"] = {
+                "paragaph": {"consume": 1}
+            }
+            with self.assertRaisesRegex(
+                EpubBlocksError,
+                r"unknown reference type.*'paragaph'",
+            ):
+                compile_recipe(
+                    epub_path,
+                    recipe,
+                    base_dir=directory,
+                    verify_digest=False,
+                )
+
+    def test_roman_source_markers_and_prefix_removal(self) -> None:
+        chapter = (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<h1>CHAPTER I An Unexpected Party</h1><p>First.</p>"
+            "<h1>Chapter II Roast Mutton</h1><p>Second.</p>"
+            "</body></html>"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(
+                directory,
+                documents={
+                    "text/chapter.xhtml": chapter,
+                    "text/aux.xhtml": AUXILIARY,
+                    "nav.xhtml": NAVIGATION,
+                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                },
+            )
+            reference_hash = write_references(
+                directory / "references.tsv",
+                [
+                    ("01.000", "{h}"),
+                    ("01.001", "{p}"),
+                    ("02.000", "{h}"),
+                    ("02.001", "{p}"),
+                ],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            mapping = cast(dict[str, object], recipe["mapping"])
+            mapping["groups"] = {
+                "reference_pattern": r"^(\d+)\.",
+                "reference_capture_kind": "decimal",
+                "source_marker": {
+                    "pattern": r"^CHAPTER\s+([IVXLCDM]+)\b",
+                    "capture_kind": "roman",
+                    "case_insensitive": True,
+                },
+            }
+            mapping["type_rules"] = {
+                "{h}": {
+                    "remove_prefix": {
+                        "pattern": r"^CHAPTER\s+[IVXLCDM]+\s+",
+                        "case_insensitive": True,
+                    }
+                }
+            }
+            compiled = finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                (compiled.blocks[0].parts[0].start, compiled.blocks[0].parts[0].end),
+                (10, 29),
+            )
+            self.assertEqual(
+                [
+                    block.text
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["An Unexpected Party", "First.", "Roast Mutton", "Second."],
+            )
+
+            remove_prefix = cast(
+                dict[str, object],
+                cast(
+                    dict[str, object],
+                    cast(dict[str, object], mapping["type_rules"])["{h}"],
+                )["remove_prefix"],
+            )
+            remove_prefix["case_insensitive"] = False
+            with self.assertRaisesRegex(EpubBlocksError, "did not match"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+
+    def test_separate_heading_marker_is_grouped_before_reserved_filter(self) -> None:
+        chapter = (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<h1>CHAPTER I</h1><h2>An Unexpected Party</h2><p>First.</p>"
+            "</body></html>"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(
+                directory,
+                documents={
+                    "text/chapter.xhtml": chapter,
+                    "text/aux.xhtml": AUXILIARY,
+                    "nav.xhtml": NAVIGATION,
+                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                },
+            )
+            reference_hash = write_references(
+                directory / "references.tsv",
+                [("01.000", "{h}"), ("01.001", "{p}")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            mapping = cast(dict[str, object], recipe["mapping"])
+            mapping["groups"] = {
+                "reference_pattern": r"^(\d+)\.",
+                "reference_capture_kind": "decimal",
+                "source_marker": {
+                    "pattern": r"^CHAPTER\s+([IVXLCDM]+)$",
+                    "capture_kind": "roman",
+                    "case_insensitive": True,
+                },
+            }
+            mapping["type_rules"] = {"{h}": {"consume": 2, "emit": [2]}}
+            compiled = finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                [
+                    block.text
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["An Unexpected Party", "First."],
+            )
+            self.assertEqual(
+                compiled.blocks[0].consumed_locators,
+                ("text/chapter.xhtml#1", "text/chapter.xhtml#2"),
+            )
+
+            mapping["type_rules"] = {}
+            mapping["skip_source"] = ["text/chapter.xhtml#1"]
+            mapping["overrides"] = {
+                "01.000": {
+                    "parts": [
+                        {
+                            "document": "text/chapter.xhtml",
+                            "element_path": "2",
+                        }
+                    ]
+                }
+            }
+            finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                [
+                    block.text
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["An Unexpected Party", "First."],
+            )
+
+    def test_source_marker_failures(self) -> None:
+        cases = (
+            ("<p>Preface</p><h1>CHAPTER I Title</h1>", "before the first"),
+            ("<h1>CHAPTER I One</h1><h1>CHAPTER I Again</h1>", "repeats group"),
+            ("<h1>CHAPTER II Two</h1><h1>CHAPTER I One</h1>", "moves backward"),
+            ("<h1>CHAPTER IIII Bad</h1>", "Roman numeral"),
+            ("<h1>CHAPTER III Unknown</h1>", "unknown group"),
+        )
+        for markup, message in cases:
             with (
                 self.subTest(message=message),
-                self.assertRaisesRegex(EpubBlocksError, message),
+                tempfile.TemporaryDirectory() as temporary_directory,
             ):
-                extract_recipe("unused.epub", recipe)
+                directory = Path(temporary_directory)
+                chapter = (
+                    '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                    + markup
+                    + "</body></html>"
+                )
+                epub_path = make_epub(
+                    directory,
+                    documents={
+                        "text/chapter.xhtml": chapter,
+                        "text/aux.xhtml": AUXILIARY,
+                        "nav.xhtml": NAVIGATION,
+                        "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                    },
+                )
+                reference_hash = write_references(
+                    directory / "references.tsv",
+                    [("01.000", "{h}"), ("02.000", "{h}")],
+                )
+                recipe = minimal_recipe(
+                    epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                    references_sha256=reference_hash,
+                )
+                cast(dict[str, object], recipe["mapping"])["groups"] = {
+                    "reference_pattern": r"^(\d+)\.",
+                    "reference_capture_kind": "decimal",
+                    "source_marker": {
+                        "pattern": r"^CHAPTER\s+(\S+)",
+                        "capture_kind": "roman",
+                        "case_insensitive": True,
+                    },
+                }
+                with self.assertRaisesRegex(EpubBlocksError, message):
+                    compile_recipe(
+                        epub_path, recipe, base_dir=directory, verify_digest=False
+                    )
+
+    def test_locator_groups_offsets_and_maps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(directory)
+            reference_path = directory / "references.tsv"
+            reference_hash = write_references(
+                reference_path,
+                [("02.a", "heading"), ("03.a", "paragraph")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            cast(dict[str, object], recipe["source_blocks"])["include_locators"] = [
+                "*#1",
+                "*#2",
+            ]
+            mapping = cast(dict[str, object], recipe["mapping"])
+            mapping["groups"] = {
+                "reference_pattern": r"^(\d+)\.",
+                "reference_capture_kind": "decimal",
+                "source_pattern": r"#(\d+)$",
+                "source_offset": 1,
+            }
+            finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                [
+                    block.text
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["Chapter One", "One two three."],
+            )
+
+            reference_hash = write_references(
+                reference_path,
+                [("AL.a", "heading"), ("QS.trailer.a", "paragraph")],
+            )
+            cast(dict[str, object], recipe["references"])["sha256"] = reference_hash
+            mapping["groups"] = {
+                "reference_pattern": r"^(AL|QS\.trailer)\.",
+                "source_pattern": r"#(\d+)$",
+                "source_map": {"1": "AL", "2": "QS.24"},
+                "reference_map": {"QS.trailer": "QS.24"},
+            }
+            finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(
+                [
+                    block.block_id
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["AL.a", "QS.trailer.a"],
+            )
+
+    def test_sparse_skips_overrides_and_splits(self) -> None:
+        chapter = (
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            "<p>ignore</p><p>AlphaBeta</p><p>Tail</p>"
+            "</body></html>"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(
+                directory,
+                documents={
+                    "text/chapter.xhtml": chapter,
+                    "text/aux.xhtml": AUXILIARY,
+                    "nav.xhtml": NAVIGATION,
+                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
+                },
+            )
+            reference_hash = write_references(
+                directory / "references.tsv",
+                [("a", "part"), ("b", "part"), ("tail", "paragraph")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            mapping = cast(dict[str, object], recipe["mapping"])
+            mapping["skip_source"] = ["text/chapter.xhtml#1"]
+            mapping["overrides"] = {
+                "a": {
+                    "parts": [
+                        {
+                            "document": "text/chapter.xhtml",
+                            "element_path": "2",
+                            "slice": {"start": 0, "end": 5},
+                        }
+                    ]
+                },
+                "b": {
+                    "parts": [
+                        {
+                            "document": "text/chapter.xhtml",
+                            "element_path": "2",
+                            "slice": {"start": 5, "end": 9},
+                        }
+                    ]
+                },
+            }
+            compiled = finalize_recipe(epub_path, recipe, directory)
+            self.assertEqual(compiled.skipped_locators, ("text/chapter.xhtml#1",))
+            self.assertEqual(compiled.reserved_locators, ("text/chapter.xhtml#2",))
+            self.assertEqual(
+                [
+                    block.text
+                    for block in extract_recipe(epub_path, recipe, base_dir=directory)
+                ],
+                ["Alpha", "Beta", "Tail"],
+            )
+
+            mapping["skip_source"] = [
+                "text/chapter.xhtml#1",
+                "text/chapter.xhtml#2",
+            ]
+            with self.assertRaisesRegex(EpubBlocksError, "both skipped and reserved"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+            mapping["skip_source"] = ["text/chapter.xhtml#999"]
+            with self.assertRaisesRegex(EpubBlocksError, "not selected"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+
+    def test_override_fragment_reuse_requires_disjoint_slices(self) -> None:
+        fragment = {"document": "text/chapter.xhtml", "element_path": "2"}
+        cases: tuple[tuple[dict[str, object], str], ...] = (
+            (
+                {
+                    "a": {"parts": [fragment]},
+                    "b": {"parts": [fragment]},
+                },
+                "every reuse must use non-overlapping slices",
+            ),
+            (
+                {
+                    "a": {"parts": [fragment]},
+                    "b": {"parts": [{**fragment, "slice": {"start": 0, "end": 5}}]},
+                },
+                "every reuse must use non-overlapping slices",
+            ),
+            (
+                {
+                    "a": {"parts": [{**fragment, "slice": {"start": 0, "end": 5}}]},
+                    "b": {"parts": [{**fragment, "slice": {"start": 4, "end": 9}}]},
+                },
+                "has overlapping slices",
+            ),
+            (
+                {
+                    "a": {
+                        "parts": [
+                            {**fragment, "slice": {"start": 0, "end": 5}},
+                            {**fragment, "slice": {"start": 0, "end": 5}},
+                        ]
+                    }
+                },
+                "has overlapping slices",
+            ),
+        )
+        for overrides, message in cases:
+            with self.subTest(message=message):
+                recipe = minimal_recipe()
+                cast(dict[str, object], recipe["mapping"])["overrides"] = overrides
+                with self.assertRaisesRegex(EpubBlocksError, message):
+                    compile_recipe("unused.epub", recipe)
+
+    def test_reference_index_validation_and_custom_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(directory)
+            reference_path = directory / "references.tsv"
+            reference_hash = write_references(
+                reference_path,
+                [("one", "paragraph")],
+                header=("identifier", "kind"),
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_path=str(reference_path),
+                references_sha256=reference_hash,
+            )
+            cast(dict[str, object], recipe["references"])["columns"] = {
+                "id": "identifier",
+                "type": "kind",
+            }
+            cast(dict[str, object], recipe["source_blocks"])["include_locators"] = [
+                "*#2"
+            ]
+            self.assertEqual(
+                compile_recipe(epub_path, recipe, verify_digest=False)
+                .blocks[0]
+                .block_id,
+                "one",
+            )
+
+            invalid_values: tuple[tuple[bytes, str], ...] = (
+                (b"", "no header"),
+                (b"id\tid\n", "duplicate columns"),
+                (b"id\ttype\textra\n", "exactly two columns"),
+                (b"id\tkind\none\tp\n", "missing column"),
+                (b"id\ttype\none\tp\textra\n", "expected 2 fields"),
+                (b"id\ttype\n\tp\n", "empty canonical reference"),
+                (b"id\ttype\none\t\n", "empty block type"),
+                (b'id\ttype\none\t"p\n', "invalid reference-index TSV"),
+                (b"id\ttype\none\tp\none\tp\n", "duplicate canonical reference"),
+                (b"id\ttype\n", "no records"),
+                (b"\xff", "not UTF-8"),
+            )
+            references = cast(dict[str, object], recipe["references"])
+            references["columns"] = {}
+            for data, message in invalid_values:
+                with self.subTest(message=message):
+                    reference_path.write_bytes(data)
+                    references["sha256"] = hashlib.sha256(data).hexdigest()
+                    with self.assertRaisesRegex(EpubBlocksError, message):
+                        compile_recipe(epub_path, recipe, verify_digest=False)
+
+    def test_structural_validation_is_fail_closed(self) -> None:
+        base = minimal_recipe()
+
+        def clone() -> dict[str, object]:
+            return cast(dict[str, object], json.loads(json.dumps(base)))
+
+        invalid: list[dict[str, object]] = []
+        changes: tuple[tuple[str, object], ...] = (
+            ("normalization", {"collapse_whitespace": "yes"}),
+            ("normalization", {"strip": 1}),
+            ("normalization", {"unicode_normalization": "UTF-8"}),
+            ("omit_epub_types", "noteref"),
+            ("omit_epub_types", [""]),
+            ("omit_epub_types", ["noteref", "noteref"]),
+            ("metadata", []),
+            ("unknown", True),
+            ("epub", {"identifier": "x"}),
+            ("references", {"path": "x", "sha256": "A" * 64}),
+            ("source_blocks", {"unknown": []}),
+            ("mapping", {"strategy": "other"}),
+        )
+        for key, value in changes:
+            recipe = clone()
+            recipe[key] = value
+            invalid.append(recipe)
+
+        recipe = clone()
+        cast(dict[str, object], recipe["source_blocks"])["include_non_linear"] = 1
+        invalid.append(recipe)
+        recipe = clone()
+        cast(dict[str, object], recipe["references"])["columns"] = {
+            "id": "same",
+            "type": "same",
+        }
+        invalid.append(recipe)
+        recipe = clone()
+        cast(dict[str, object], recipe["references"])["columns"] = {"unknown": "x"}
+        invalid.append(recipe)
+
+        bad_groups: tuple[object, ...] = (
+            {"reference_pattern": "("},
+            {"reference_pattern": "(x)"},
+            {"source_pattern": "(x)"},
+            {
+                "reference_pattern": "(x)",
+                "source_pattern": "(x)",
+                "source_marker": {
+                    "pattern": "^(x)",
+                    "capture_kind": "string",
+                },
+            },
+            {
+                "reference_pattern": "(x)",
+                "source_pattern": "(x)",
+                "source_map": {},
+            },
+            {
+                "reference_pattern": "(x)",
+                "source_pattern": "(x)",
+                "source_map": {"x": "x"},
+                "source_offset": 1,
+            },
+            {"reference_map": {"x": "x"}},
+            {"source_offset": 1},
+            {
+                "reference_pattern": "(x)",
+                "reference_capture_kind": "roman",
+                "source_pattern": "(x)",
+            },
+            {
+                "reference_pattern": "(x)",
+                "source_marker": {
+                    "pattern": "(x)",
+                    "capture_kind": "roman",
+                },
+            },
+            {
+                "reference_pattern": "(x)",
+                "source_marker": {
+                    "pattern": "^(x)",
+                    "capture_kind": "bad",
+                },
+            },
+            {
+                "reference_pattern": "(x)",
+                "source_marker": {
+                    "pattern": "^(x)",
+                    "capture_kind": "string",
+                    "case_insensitive": 1,
+                },
+            },
+        )
+        for groups in bad_groups:
+            recipe = clone()
+            cast(dict[str, object], recipe["mapping"])["groups"] = groups
+            invalid.append(recipe)
+
+        bad_mapping_values: tuple[tuple[str, object], ...] = (
+            ("join_separator", 1),
+            ("skip_source", ["not-a-locator"]),
+            ("skip_source", ["bad\u2028path#1"]),
+            ("compiled_sha256", "sha256:" + "0" * 64),
+            ("type_rules", {"": {"consume": 1}}),
+            ("type_rules", {"p": []}),
+            ("type_rules", {"p": {"consume": 0}}),
+            ("type_rules", {"p": {"consume": True}}),
+            ("type_rules", {"p": {"emit": []}}),
+            ("type_rules", {"p": {"emit": [1, 1]}}),
+            ("type_rules", {"p": {"consume": 1, "emit": [2]}}),
+            ("type_rules", {"p": {"separator": 1}}),
+            (
+                "type_rules",
+                {"p": {"consume": 2, "remove_prefix": {"pattern": "^x"}}},
+            ),
+            (
+                "type_rules",
+                {"p": {"remove_prefix": {"pattern": "x"}}},
+            ),
+            (
+                "type_rules",
+                {"p": {"remove_prefix": {"pattern": "^"}}},
+            ),
+            (
+                "type_rules",
+                {
+                    "p": {
+                        "remove_prefix": {
+                            "pattern": "^x",
+                            "case_insensitive": 1,
+                        }
+                    }
+                },
+            ),
+        )
+        for name, value in bad_mapping_values:
+            recipe = clone()
+            cast(dict[str, object], recipe["mapping"])[name] = value
+            invalid.append(recipe)
+
+        bad_overrides: tuple[dict[str, object], ...] = (
+            {"": {"parts": [{"document": "x", "element_path": "1"}]}},
+            {"a": []},
+            {"a": {"parts": []}},
+            {"a": {"parts": [{}]}},
+            {"a": {"parts": [{"document": "x", "element_path": "+1"}]}},
+            {
+                "a": {
+                    "parts": [
+                        {
+                            "document": "x",
+                            "element_path": "1",
+                            "omit": ["1", "1.2"],
+                        }
+                    ]
+                }
+            },
+            {
+                "a": {
+                    "parts": [
+                        {
+                            "document": "x",
+                            "element_path": "1",
+                            "slice": {"start": 1, "end": 1},
+                        }
+                    ]
+                }
+            },
+            {
+                "a": {
+                    "parts": [{"document": "x", "element_path": "1"}],
+                    "separator": 1,
+                }
+            },
+            {
+                "a": {
+                    "parts": [{"document": "x", "element_path": "1"}],
+                    "remove_prefix": {"pattern": "^x"},
+                }
+            },
+        )
+        for overrides in bad_overrides:
+            recipe = clone()
+            cast(dict[str, object], recipe["mapping"])["overrides"] = overrides
+            invalid.append(recipe)
+
+        for index, recipe in enumerate(invalid):
+            with self.subTest(index=index), self.assertRaises(EpubBlocksError):
+                compile_recipe("unused.epub", recipe)
+
+    def test_mapping_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            epub_path = make_epub(directory)
+            reference_path = directory / "references.tsv"
+            reference_hash = write_references(
+                reference_path,
+                [("one", "paragraph")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=reference_hash,
+            )
+            cast(dict[str, object], recipe["source_blocks"])["include_locators"] = [
+                "*#1",
+                "*#2",
+            ]
+            mapping = cast(dict[str, object], recipe["mapping"])
+            with self.assertRaisesRegex(EpubBlocksError, "unmapped source"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+            mapping["overrides"] = {
+                "unknown": {
+                    "parts": [{"document": "text/chapter.xhtml", "element_path": "1"}]
+                }
+            }
+            with self.assertRaisesRegex(EpubBlocksError, "unknown reference"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+            mapping["overrides"] = {
+                "one": {"parts": [{"document": "missing.xhtml", "element_path": "1"}]}
+            }
+            with self.assertRaises(EpubBlocksError):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+
+            mapping["overrides"] = {}
+            cast(dict[str, object], recipe["source_blocks"])["include_locators"] = [
+                "*#1"
+            ]
+            finalized = finalize_recipe(epub_path, recipe, directory)
+            mapping["compiled_sha256"] = "0" * 64
+            with self.assertRaisesRegex(EpubBlocksError, "compiled SHA-256"):
+                compile_recipe(epub_path, recipe, base_dir=directory)
+            cast(dict[str, object], recipe["epub"])["sha256"] = "0" * 64
+            with self.assertRaisesRegex(EpubBlocksError, "source SHA-256"):
+                compile_recipe(
+                    epub_path, recipe, base_dir=directory, verify_digest=False
+                )
+            self.assertTrue(finalized.blocks)
 
     def test_duplicate_json_members_and_json_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             duplicate = directory / "duplicate.json"
             duplicate.write_text(
-                '{"recipe_version":"1","blocks":[],"blocks":[]}',
+                '{"recipe_version":"1","epub":{},"epub":{}}',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(EpubBlocksError, "duplicate JSON.*blocks"):
+            with self.assertRaisesRegex(EpubBlocksError, "duplicate JSON.*epub"):
                 load_recipe(duplicate)
 
             nested = directory / "nested.json"
             nested.write_text(
-                '{"recipe_version":"1","blocks":[{"id":"a","id":"b"}]}',
+                '{"recipe_version":"1","mapping":{"groups":{},"groups":{}}}',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(EpubBlocksError, r"blocks\[1\].*duplicate"):
+            with self.assertRaisesRegex(EpubBlocksError, r"mapping.*duplicate"):
                 load_recipe(nested)
 
             invalid = directory / "invalid.json"
@@ -580,188 +1783,39 @@ class RecipeTests(unittest.TestCase):
             with self.assertRaisesRegex(EpubBlocksError, "not UTF-8"):
                 load_recipe(binary)
 
-    def test_identity_hash_and_version_validation(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            epub_path = make_epub(Path(temporary_directory))
-            cases: list[tuple[dict[str, object], str]] = [
-                (minimal_recipe(recipe_version=1), "unsupported version"),
-                (minimal_recipe(epub={"identifier": ""}), "non-empty string"),
-                (minimal_recipe(epub={"sha256": ""}), "64 lowercase"),
-                (minimal_recipe(epub={"sha256": "A" * 64}), "64 lowercase"),
-                (minimal_recipe(epub={"sha256": "0" * 64}), "does not match"),
-                (
-                    minimal_recipe(epub={"identifier": "other-edition"}),
-                    "expected package identifier",
-                ),
-            ]
-            for recipe, message in cases:
-                with (
-                    self.subTest(message=message),
-                    self.assertRaisesRegex(EpubBlocksError, message),
-                ):
-                    extract_recipe(epub_path, recipe)
+            for constant in ("NaN", "Infinity", "-Infinity"):
+                with self.subTest(constant=constant):
+                    invalid.write_text(
+                        '{"recipe_version":"1","metadata":{"value":' + constant + "}}",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        EpubBlocksError, "invalid JSON constant"
+                    ):
+                        load_recipe(invalid)
 
-    def test_field_type_and_value_validation(self) -> None:
-        invalid: list[tuple[dict[str, object], str]] = [
-            (minimal_recipe(epub=[]), "epub: must be an object"),
-            (
-                minimal_recipe(normalization={"collapse_whitespace": "yes"}),
-                "collapse_whitespace.*boolean",
-            ),
-            (
-                minimal_recipe(normalization={"strip": 1}),
-                "strip.*boolean",
-            ),
-            (
-                minimal_recipe(normalization={"unicode_normalization": "UTF-8"}),
-                "unknown value",
-            ),
-            (minimal_recipe(omit_epub_types=[""]), "non-empty strings"),
-            (minimal_recipe(blocks=[]), "non-empty array"),
-            (minimal_recipe(blocks=["block"]), "must be an object"),
-        ]
-        for recipe, message in invalid:
-            with (
-                self.subTest(message=message),
-                self.assertRaisesRegex(EpubBlocksError, message),
-            ):
-                extract_recipe("unused.epub", recipe)
-
-    def test_block_part_omit_and_slice_validation(self) -> None:
-        invalid_blocks: list[tuple[object, str]] = [
-            ({"id": "", "type": "p", "parts": [{}]}, "id.*non-empty"),
-            ({"id": "a", "type": "", "parts": [{}]}, "type.*non-empty"),
-            ({"id": "a", "type": "p", "parts": []}, "parts.*non-empty"),
-            (
-                {"id": "a", "type": "p", "parts": [{}]},
-                "document.*non-empty",
-            ),
-            (
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [{"document": "x", "element_path": "+1"}],
-                },
-                "positive integers",
-            ),
-            (
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [{"document": "x", "omit": ["1", "1.2"]}],
-                },
-                "duplicates or overlaps",
-            ),
-            (
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [{"document": "x", "slice": {"start": 0}}],
-                },
-                "start and end must be integers",
-            ),
-            (
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [
-                        {"document": "x", "slice": {"start": True, "end": 2}}
-                    ],
-                },
-                "start and end must be integers",
-            ),
-            (
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [{"document": "x", "slice": {"start": 2, "end": 1}}],
-                },
-                "0 <= start < end",
-            ),
-            (
-                {"id": "a", "type": "p", "separator": 1, "parts": [{}]},
-                "document.*non-empty",
-            ),
-        ]
-        for block, message in invalid_blocks:
-            with (
-                self.subTest(message=message),
-                self.assertRaisesRegex(EpubBlocksError, message),
-            ):
-                extract_recipe("unused.epub", minimal_recipe(blocks=[block]))
-
-        duplicate_ids = minimal_recipe(
-            blocks=[
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [{"document": "x"}],
-                },
-                {
-                    "id": "a",
-                    "type": "p",
-                    "parts": [{"document": "x"}],
-                },
-            ]
-        )
-        with self.assertRaisesRegex(EpubBlocksError, "duplicate block id"):
-            extract_recipe("unused.epub", duplicate_ids)
-
-    def test_huge_element_path_component_fails_cleanly(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            epub_path = make_epub(Path(temporary_directory))
-            recipe = minimal_recipe()
-            blocks = cast_dict_list(recipe["blocks"])
-            parts = cast_dict_list(blocks[0]["parts"])
-            parts[0]["omit"] = ["1" + "0" * 5000]
-            with self.assertRaisesRegex(EpubBlocksError, "invalid element path"):
-                extract_recipe(epub_path, recipe)
-
-    def test_source_and_empty_extraction_errors(self) -> None:
+    def test_extract_fragments_uses_one_pinned_epub(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
-            malformed = make_epub(
-                directory,
-                filename="malformed.epub",
-                documents={
-                    "text/chapter.xhtml": "<html>",
-                    "text/aux.xhtml": AUXILIARY,
-                    "nav.xhtml": NAVIGATION,
-                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
-                },
+            epub_path = make_epub(directory)
+            digest = hashlib.sha256(epub_path.read_bytes()).hexdigest()
+            texts = extract_fragments(
+                epub_path,
+                [
+                    Fragment("text/chapter.xhtml", "6.1", omit_paths=("1",)),
+                    Fragment("text/chapter.xhtml", "1", start=8, end=11),
+                ],
+                expected_identifier="sample-edition",
+                expected_sha256=digest,
+                omit_epub_types=frozenset({"noteref", "pagebreak"}),
             )
-            with self.assertRaisesRegex(EpubBlocksError, "malformed XML"):
-                extract_recipe(malformed, minimal_recipe())
-
-            epub_path = make_epub(
-                directory,
-                filename="valid.epub",
-                documents={
-                    "text/chapter.xhtml": (
-                        '<html xmlns="http://www.w3.org/1999/xhtml">'
-                        "<body><p/></body></html>"
-                    ),
-                    "text/aux.xhtml": AUXILIARY,
-                    "nav.xhtml": NAVIGATION,
-                    "images/cover.svg": '<svg xmlns="http://www.w3.org/2000/svg"/>',
-                },
-            )
-            empty_recipe = minimal_recipe(
-                blocks=[
-                    {
-                        "id": "a",
-                        "type": "p",
-                        "parts": [
-                            {
-                                "document": "text/chapter.xhtml",
-                                "element_path": "1",
-                            }
-                        ],
-                    }
-                ]
-            )
-            with self.assertRaisesRegex(EpubBlocksError, "produced no text"):
-                extract_recipe(epub_path, empty_recipe)
+            self.assertEqual(texts, ["Alpha omega", "One"])
+            with self.assertRaisesRegex(EpubBlocksError, "expected_sha256"):
+                extract_fragments(epub_path, [], expected_sha256="bad")
+            with self.assertRaisesRegex(EpubBlocksError, "source SHA-256"):
+                extract_fragments(epub_path, [], expected_sha256="0" * 64)
+            with self.assertRaisesRegex(EpubBlocksError, "identifier"):
+                extract_fragments(epub_path, [], expected_identifier="")
 
     def test_atomic_tsv_preserves_existing_output_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -778,22 +1832,25 @@ class RecipeTests(unittest.TestCase):
             self.assertEqual(list(output.parent.glob(".records.tsv.*.tmp")), [])
 
 
-def cast_dict_list(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        raise TypeError("test fixture is not a list of dictionaries")
-    values = cast(list[object], value)
-    if not all(isinstance(item, dict) for item in values):
-        raise TypeError("test fixture is not a list of dictionaries")
-    return cast(list[dict[str, object]], values)
-
-
 class CliTests(unittest.TestCase):
     def test_cli_success_error_and_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             epub_path = make_epub(directory)
+            references_hash = write_references(
+                directory / "references.tsv",
+                [("one", "paragraph")],
+            )
+            recipe = minimal_recipe(
+                epub_sha256=hashlib.sha256(epub_path.read_bytes()).hexdigest(),
+                references_sha256=references_hash,
+            )
+            cast(dict[str, object], recipe["source_blocks"])["include_locators"] = [
+                "*#2"
+            ]
+            finalize_recipe(epub_path, recipe, directory)
             recipe_path = directory / "recipe.json"
-            recipe_path.write_text(json.dumps(minimal_recipe()), encoding="utf-8")
+            recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
             output_path = directory / "records.tsv"
 
             stdout = io.StringIO()

@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/jtauber/epub-blocks/main/src/epub_blocks/schemas/recipe-v1.schema.json",
+  "title": "epub-blocks extraction recipe version 1",
+  "description": "A structural recipe mapping blocks from a pinned EPUB to a pinned canonical reference index.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["recipe_version", "epub", "references", "source_blocks", "mapping"],
+  "properties": {
+    "recipe_version": {"const": "1"},
+    "metadata": {
+      "type": "object",
+      "description": "Opaque metadata ignored by epub-blocks.",
+      "additionalProperties": true
+    },
+    "epub": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "sha256"],
+      "properties": {
+        "identifier": {"$ref": "#/$defs/nonEmptyString"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/nonEmptyString"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "columns": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"$ref": "#/$defs/nonEmptyString", "default": "id"},
+            "type": {"$ref": "#/$defs/nonEmptyString", "default": "type"}
+          },
+          "default": {}
+        }
+      }
+    },
+    "normalization": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "collapse_whitespace": {"type": "boolean", "default": true},
+        "strip": {"type": "boolean", "default": true},
+        "unicode_normalization": {
+          "enum": ["NFC", "NFD", "NFKC", "NFKD", "none"],
+          "default": "NFC"
+        }
+      }
+    },
+    "omit_epub_types": {"$ref": "#/$defs/stringArray"},
+    "source_blocks": {"$ref": "#/$defs/sourceBlocks"},
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strategy", "compiled_sha256"],
+      "properties": {
+        "strategy": {"const": "ordered"},
+        "groups": {"$ref": "#/$defs/groups"},
+        "join_separator": {"type": "string", "default": " "},
+        "type_rules": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"$ref": "#/$defs/typeRule"},
+          "default": {}
+        },
+        "skip_source": {"$ref": "#/$defs/sourceLocatorArray"},
+        "overrides": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"$ref": "#/$defs/override"},
+          "default": {}
+        },
+        "compiled_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stringArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonEmptyString"},
+      "default": []
+    },
+    "sourceLocator": {
+      "type": "string",
+      "pattern": "^.+#[1-9][0-9]*(?:\\.[1-9][0-9]*)*$",
+      "not": {"pattern": "[\\r\\n\\u2028\\u2029]"}
+    },
+    "sourceLocatorArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/sourceLocator"},
+      "default": []
+    },
+    "sourceBlocks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include_documents": {"$ref": "#/$defs/stringArray"},
+        "exclude_documents": {"$ref": "#/$defs/stringArray"},
+        "exclude_classes": {"$ref": "#/$defs/stringArray"},
+        "include_locators": {"$ref": "#/$defs/stringArray"},
+        "exclude_locators": {"$ref": "#/$defs/stringArray"},
+        "include_non_linear": {"type": "boolean", "default": false}
+      }
+    },
+    "groups": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reference_pattern": {"$ref": "#/$defs/nonEmptyString"},
+        "reference_capture_kind": {
+          "enum": ["string", "decimal"],
+          "default": "string"
+        },
+        "source_pattern": {"$ref": "#/$defs/nonEmptyString"},
+        "source_marker": {"$ref": "#/$defs/sourceMarker"},
+        "source_offset": {"type": "integer", "default": 0},
+        "reference_map": {"$ref": "#/$defs/stringMap"},
+        "source_map": {"$ref": "#/$defs/stringMap"}
+      },
+      "oneOf": [
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["reference_pattern"]},
+              {"required": ["source_pattern"]},
+              {"required": ["source_marker"]}
+            ]
+          }
+        },
+        {
+          "required": ["reference_pattern", "source_pattern"],
+          "not": {"required": ["source_marker"]}
+        },
+        {
+          "required": ["reference_pattern", "source_marker"],
+          "not": {"required": ["source_pattern"]}
+        }
+      ],
+      "default": {}
+    },
+    "sourceMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern", "capture_kind"],
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\^"
+        },
+        "capture_kind": {"enum": ["string", "decimal", "roman"]},
+        "case_insensitive": {"type": "boolean", "default": false}
+      }
+    },
+    "stringMap": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "typeRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consume": {"type": "integer", "minimum": 1, "default": 1},
+        "emit": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "separator": {"type": "string"},
+        "remove_prefix": {"$ref": "#/$defs/removePrefix"}
+      }
+    },
+    "removePrefix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern"],
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\^"
+        },
+        "case_insensitive": {"type": "boolean", "default": false}
+      }
+    },
+    "elementPath": {
+      "type": "string",
+      "pattern": "^(?:[1-9][0-9]*(?:\\.[1-9][0-9]*)*)?$"
+    },
+    "nonEmptyElementPath": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*(?:\\.[1-9][0-9]*)*$"
+    },
+    "slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1}
+      }
+    },
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document"],
+      "properties": {
+        "document": {"$ref": "#/$defs/nonEmptyString"},
+        "element_path": {"$ref": "#/$defs/elementPath"},
+        "omit": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonEmptyElementPath"},
+          "default": []
+        },
+        "slice": {"$ref": "#/$defs/slice"}
+      }
+    },
+    "override": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parts"],
+      "properties": {
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/part"}
+        },
+        "separator": {"type": "string", "default": ""}
+      }
+    }
+  }
+}

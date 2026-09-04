@@ -10,6 +10,8 @@ from .recipe import extract_recipe_file, write_tsv
 
 
 def main() -> int:
+    """Run the command-line extractor and return a process exit status."""
+
     parser = argparse.ArgumentParser(
         description="Apply a recipe to an EPUB and write structured text as TSV."
     )

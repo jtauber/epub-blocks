@@ -7,7 +7,7 @@ import unicodedata
 from .errors import EpubBlocksError
 from .models import Fragment, NormalizationOptions
 from .safety import EpubArchive
-from .xml import XmlElement, parse_xml
+from .xml import XmlElement, local_name, parse_xml
 
 EPUB_TYPE = "{http://www.idpf.org/2007/ops}type"
 XHTML_BODY = "{http://www.w3.org/1999/xhtml}body"
@@ -121,6 +121,25 @@ def normalize_text(text: str, options: NormalizationOptions) -> str:
     return text
 
 
+def flatten_text(element: XmlElement) -> str:
+    """Flatten an XHTML subtree while retaining explicit line boundaries."""
+
+    pieces: list[str] = []
+
+    def collect(current: XmlElement) -> None:
+        if local_name(current.tag) == "br":
+            pieces.append("\n")
+        if current.text:
+            pieces.append(current.text)
+        for child in current:
+            collect(child)
+            if child.tail:
+                pieces.append(child.tail)
+
+    collect(element)
+    return "".join(pieces)
+
+
 def read_document_body(
     epub: EpubArchive,
     document_path: str,
@@ -174,7 +193,7 @@ def extract_fragment(
         remove_at(selected, element_path, location)
     remove_descendants_by_epub_type(selected, omit_epub_types)
 
-    text = "".join(selected.itertext())
+    text = flatten_text(selected)
     if fragment.start is None and fragment.end is None:
         return text
     if not isinstance(fragment.start, int) or not isinstance(fragment.end, int):
@@ -187,4 +206,4 @@ def extract_fragment(
             f"{location}: slice [{fragment.start}, {fragment.end}) is outside a "
             f"{len(text)}-code-point fragment"
         )
-    return text[fragment.start:fragment.end]
+    return text[fragment.start : fragment.end]

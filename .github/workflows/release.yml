@@ -8,18 +8,159 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Check formatting
+        run: uv run ruff format --check .
+      - name: Lint
+        run: uv run ruff check .
+      - name: Run strict type checking
+        run: uv run pyright
+      - name: Run tests with branch coverage
+        run: |
+          uv run coverage erase
+          uv run coverage run -m unittest discover -s tests
+          uv run coverage report
+      - name: Verify the public typing surface
+        run: uv run pyright --verifytypes epub_blocks --ignoreexternal
+
   build:
     name: Build distributions
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.13"
           enable-cache: true
       - run: uv sync --locked
-      - run: uv run python -m build
-      - run: uv run twine check dist/*
+      - name: Verify release tag matches the package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          expected = f"v{project['project']['version']}"
+          actual = os.environ["RELEASE_TAG"]
+          if actual != expected:
+              raise SystemExit(
+                  f"release tag {actual!r} does not match pyproject version "
+                  f"({expected!r})"
+              )
+          PY
+      - name: Prepare an empty artifact directory
+        run: |
+          uv run python - <<'PY'
+          import pathlib
+          import shutil
+
+          artifacts = pathlib.Path("dist")
+          if artifacts.exists():
+              shutil.rmtree(artifacts)
+          artifacts.mkdir()
+          if any(artifacts.iterdir()):
+              raise SystemExit("dist/ is not empty")
+          PY
+      - name: Build distributions
+        run: uv run python -m build --outdir dist
+      - name: Check distribution metadata
+        run: uv run twine check --strict dist/*
+      - name: Inspect artifacts
+        run: |
+          uv run python - <<'PY'
+          import pathlib
+          import tarfile
+          import tomllib
+          import zipfile
+
+          dist = pathlib.Path("dist")
+          artifacts = sorted(path for path in dist.iterdir() if path.is_file())
+          source_archives = [
+              path for path in artifacts if path.name.endswith(".tar.gz")
+          ]
+          wheels = [path for path in artifacts if path.suffix == ".whl"]
+          if len(artifacts) != 2 or len(source_archives) != 1 or len(wheels) != 1:
+              raise SystemExit(
+                  "expected exactly one source archive and one wheel; found "
+                  + ", ".join(path.name for path in artifacts)
+              )
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          version = project["project"]["version"]
+          source = source_archives[0]
+          wheel = wheels[0]
+          expected_source = f"epub_blocks-{version}.tar.gz"
+          expected_wheel = f"epub_blocks-{version}-py3-none-any.whl"
+          if source.name != expected_source or wheel.name != expected_wheel:
+              raise SystemExit(
+                  "unexpected artifact names: "
+                  f"{source.name!r}, {wheel.name!r}"
+              )
+
+          with tarfile.open(source) as archive:
+              source_names = archive.getnames()
+          for suffix in (
+              "/docs/recipe-format.md",
+              "/src/epub_blocks/py.typed",
+              "/src/epub_blocks/schemas/recipe-v1.schema.json",
+          ):
+              if not any(name.endswith(suffix) for name in source_names):
+                  raise SystemExit(f"source archive is missing {suffix[1:]}")
+
+          with zipfile.ZipFile(wheel) as archive:
+              wheel_names = set(archive.namelist())
+          for name in (
+              "epub_blocks/py.typed",
+              "epub_blocks/schemas/recipe-v1.schema.json",
+          ):
+              if name not in wheel_names:
+                  raise SystemExit(f"wheel is missing {name}")
+          PY
+      - name: Smoke-test the built wheel
+        run: |
+          uv venv --python 3.13 .release-wheel-venv
+          uv pip install --python .release-wheel-venv/bin/python --no-deps dist/*.whl
+          .release-wheel-venv/bin/epub-blocks --version
+          .release-wheel-venv/bin/python - <<'PY'
+          import importlib.metadata
+          import importlib.resources
+          import json
+          import pathlib
+          import tomllib
+
+          project = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          expected = project["project"]["version"]
+          actual = importlib.metadata.version("epub-blocks")
+          if actual != expected:
+              raise SystemExit(
+                  f"installed version {actual!r} does not match {expected!r}"
+              )
+          schema = importlib.resources.files("epub_blocks").joinpath(
+              "schemas", "recipe-v1.schema.json"
+          )
+          json.loads(schema.read_text(encoding="utf-8"))
+          PY
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: python-package-distributions

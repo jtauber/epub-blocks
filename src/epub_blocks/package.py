@@ -33,9 +33,7 @@ def archive_path(package_path: str, href: str) -> str:
         posixpath.join(posixpath.dirname(package_path), href_path)
     )
     if resolved == ".." or resolved.startswith(("../", "/")):
-        raise EpubBlocksError(
-            f"EPUB manifest path escapes the archive root: {href!r}"
-        )
+        raise EpubBlocksError(f"EPUB manifest path escapes the archive root: {href!r}")
     return resolved
 
 
@@ -77,9 +75,7 @@ def read_epub_package(epub: EpubArchive) -> EpubPackage:
         raise EpubBlocksError("EPUB package has an unexpected root element")
 
     metadata = _single_child(package, f"./{{{OPF_NS}}}metadata", "metadata")
-    manifest_element = _single_child(
-        package, f"./{{{OPF_NS}}}manifest", "manifest"
-    )
+    manifest_element = _single_child(package, f"./{{{OPF_NS}}}manifest", "manifest")
     spine_element = _single_child(package, f"./{{{OPF_NS}}}spine", "spine")
 
     identifiers = frozenset(
@@ -98,9 +94,7 @@ def read_epub_package(epub: EpubArchive) -> EpubPackage:
         if not item.get("href"):
             raise EpubBlocksError(f"EPUB manifest item {item_id!r} has no href")
         if not item.get("media-type"):
-            raise EpubBlocksError(
-                f"EPUB manifest item {item_id!r} has no media-type"
-            )
+            raise EpubBlocksError(f"EPUB manifest item {item_id!r} has no media-type")
         manifest[item_id] = item
 
     spine: list[SpineDocument] = []
@@ -115,8 +109,7 @@ def read_epub_package(epub: EpubArchive) -> EpubPackage:
         linear_value = itemref.get("linear", "yes")
         if linear_value not in {"yes", "no"}:
             raise EpubBlocksError(
-                f"EPUB spine item {item_id!r} has invalid linear value "
-                f"{linear_value!r}"
+                f"EPUB spine item {item_id!r} has invalid linear value {linear_value!r}"
             )
         item = manifest[item_id]
         if item.get("media-type") != XHTML_MEDIA_TYPE:
@@ -160,9 +153,7 @@ def matches(value: str, patterns: Sequence[str]) -> bool:
     """Match case-insensitive globs without operating-system path rewriting."""
 
     folded = value.casefold()
-    return any(
-        fnmatch.fnmatchcase(folded, pattern.casefold()) for pattern in patterns
-    )
+    return any(fnmatch.fnmatchcase(folded, pattern.casefold()) for pattern in patterns)
 
 
 def select_spine_documents(
