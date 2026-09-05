@@ -4,8 +4,15 @@ import copy
 import re
 import unicodedata
 
+from ._content import (
+    RichText,
+    build_rich_text,
+    child_locator,
+    normalize_rich_text,
+    slice_rich_text,
+)
 from .errors import EpubBlocksError
-from .models import Fragment, NormalizationOptions
+from .models import ContentOptions, Fragment, NormalizationOptions
 from .safety import EpubArchive
 from .xml import XmlElement, local_name, parse_xml
 
@@ -207,3 +214,53 @@ def extract_fragment(
             f"{len(text)}-code-point fragment"
         )
     return text[fragment.start : fragment.end]
+
+
+def extract_rich_fragment(
+    epub: EpubArchive,
+    fragment: Fragment,
+    *,
+    cache: dict[str, XmlElement],
+    normalization: NormalizationOptions,
+    omit_epub_types: frozenset[str],
+    content: ContentOptions,
+) -> RichText:
+    location = f"{fragment.document_path}#{fragment.element_path}"
+    body = read_document_body(epub, fragment.document_path, cache)
+    original = child_at(body, fragment.element_path, location)
+    selected = copy.deepcopy(original)
+    previous: XmlElement | None = None
+    if fragment.element_path:
+        components = fragment.element_path.split(".")
+        index = int(components[-1]) - 1
+        if index:
+            parent = child_at(body, ".".join(components[:-1]), location)
+            previous = list(parent)[index - 1]
+    origins: dict[int, tuple[str, XmlElement, XmlElement | None]] = {}
+
+    def remember(
+        element: XmlElement, source: XmlElement, at: str, prev: XmlElement | None
+    ) -> None:
+        origins[id(element)] = (at, source, prev)
+        prev_child: XmlElement | None = None
+        for index, (child, source_child) in enumerate(
+            zip(element, source, strict=True), 1
+        ):
+            remember(child, source_child, child_locator(at, index), prev_child)
+            prev_child = source_child
+
+    remember(selected, original, location, previous)
+    # Validation of overlapping omissions is shared with recipe parsing.
+    for path in sorted(
+        fragment.omit_paths, key=lambda p: _path_components(p, location), reverse=True
+    ):
+        remove_at(selected, path, location)
+    tree = normalize_rich_text(
+        build_rich_text(
+            selected, location, content, omit_epub_types, previous, origins
+        ),
+        normalization,
+    )
+    if fragment.start is not None and fragment.end is not None:
+        tree = slice_rich_text(tree, fragment.start, fragment.end)
+    return tree

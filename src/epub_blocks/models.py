@@ -7,6 +7,66 @@ UnicodeNormalization = Literal["NFC", "NFD", "NFKC", "NFKD", "none"]
 
 
 @dataclass(frozen=True)
+class ElementSelector:
+    """A conjunctive structural selector used by a compiled content policy."""
+
+    tag: str | None = None
+    classes: tuple[str, ...] | None = None
+    classes_any: tuple[str, ...] = ()
+    classes_all: tuple[str, ...] = ()
+    locators: tuple[str, ...] = ()
+    epub_types: tuple[str, ...] = ()
+    attributes: tuple[tuple[str, str], ...] = ()
+    empty: bool | None = None
+    previous_sibling: ElementSelector | None = None
+    has_child: ElementSelector | None = None
+
+
+@dataclass(frozen=True)
+class ElementRule:
+    """An ordered source-element selection override."""
+
+    match: ElementSelector
+    action: str
+    keep_empty: bool = False
+
+
+@dataclass(frozen=True)
+class MarkupRule:
+    """A source selector and its span or milestone representation."""
+
+    match: ElementSelector
+    kind: str
+    name: str
+    label_attribute: str | None = None
+
+
+@dataclass(frozen=True)
+class MarkupOptions:
+    """Serializer configuration and explicit detached-milestone policies."""
+
+    format: str = "xml"
+    rules: tuple[MarkupRule, ...] = ()
+    delimiters: tuple[tuple[str, tuple[str, str]], ...] = ()
+    between_blocks: str = "error"
+    trailing: str = "error"
+
+
+@dataclass(frozen=True)
+class ContentOptions:
+    """Optional structural and markup policies pinned in a compiled recipe."""
+
+    element_rules: tuple[ElementRule, ...] = ()
+    strict_coverage: bool = False
+    boundary_tags: tuple[str, ...] = ()
+    boundary_separator: str = " "
+    markup: MarkupOptions | None = None
+
+
+DEFAULT_CONTENT = ContentOptions()
+
+
+@dataclass(frozen=True)
 class SpineDocument:
     """One XHTML document in EPUB spine order."""
 
@@ -54,6 +114,11 @@ class CompiledBlock:
     parts: tuple[Fragment, ...]
     separator: str = ""
     consumed_locators: tuple[str, ...] = ()
+    allow_empty: bool = False
+    # Before the indexed part; len(parts) denotes the end of the joined block.
+    milestones: tuple[tuple[int, Fragment], ...] = ()
+    # After the indexed part, before its following join separator.
+    milestones_after: tuple[tuple[int, Fragment], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,6 +132,7 @@ class CompiledRecipe:
     blocks: tuple[CompiledBlock, ...]
     skipped_locators: tuple[str, ...] = ()
     reserved_locators: tuple[str, ...] = ()
+    content: ContentOptions = DEFAULT_CONTENT
 
 
 @dataclass(frozen=True)

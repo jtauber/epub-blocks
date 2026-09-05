@@ -9,8 +9,25 @@ from pathlib import Path
 from typing import BinaryIO
 from zipfile import BadZipFile, ZipFile
 
+from ._content import (
+    EPUB_TYPE,
+    build_rich_text,
+    markup_rule,
+    milestones,
+    normalize_rich_text,
+    plain_text,
+    source_rule,
+)
 from .errors import EpubBlocksError
-from .models import EpubPackage, Fragment, NormalizationOptions, TextBlock
+from .models import (
+    DEFAULT_CONTENT,
+    ContentOptions,
+    EpubPackage,
+    Fragment,
+    NormalizationOptions,
+    SpineDocument,
+    TextBlock,
+)
 from .package import matches, read_epub_package, select_spine_documents
 from .safety import DEFAULT_SAFETY_LIMITS, EpubArchive, SafetyLimits
 from .xhtml import (
@@ -79,6 +96,8 @@ def _extract_blocks_from_epub(
     omit_epub_types: frozenset[str] = DEFAULT_OMITTED_EPUB_TYPES,
     normalization: NormalizationOptions = _DEFAULT_NORMALIZATION,
     document_cache: dict[str, XmlElement] | None = None,
+    content: ContentOptions = DEFAULT_CONTENT,
+    detached_milestones: list[Fragment] | None = None,
 ) -> list[TextBlock]:
     """Extract blocks from an already-open, bounded EPUB archive."""
 
@@ -91,6 +110,22 @@ def _extract_blocks_from_epub(
         include_non_linear=include_non_linear,
     )
     cache = document_cache if document_cache is not None else {}
+    if content != ContentOptions():
+        return _extract_content_blocks(
+            epub,
+            documents,
+            cache,
+            source_path,
+            primary_tags,
+            fallback_tags,
+            excluded_classes,
+            include_locators,
+            exclude_locators,
+            omit_epub_types,
+            normalization,
+            content,
+            detached_milestones,
+        )
     for document in documents:
         body = read_document_body(epub, document.path, cache)
         for element, address in _candidate_elements(body, primary_tags, fallback_tags):
@@ -118,6 +153,111 @@ def _extract_blocks_from_epub(
                     classes=classes,
                 )
             )
+    if not blocks:
+        raise EpubBlocksError(f"{source_path}: no text blocks matched the selection")
+    return blocks
+
+
+def _extract_content_blocks(
+    epub: EpubArchive,
+    documents: Sequence[SpineDocument],
+    cache: dict[str, XmlElement],
+    source_path: Path,
+    primary_tags: frozenset[str],
+    fallback_tags: frozenset[str],
+    excluded_classes: set[str],
+    include_locators: Sequence[str] | None,
+    exclude_locators: Sequence[str] | None,
+    omitted_types: frozenset[str],
+    normalization: NormalizationOptions,
+    content: ContentOptions,
+    detached: list[Fragment] | None,
+) -> list[TextBlock]:
+    blocks: list[TextBlock] = []
+
+    def included(element: XmlElement, locator: str) -> bool:
+        return not (
+            {token.casefold() for token in element.get("class", "").split()}
+            & excluded_classes
+            or (include_locators and not matches(locator, include_locators))
+            or (exclude_locators and matches(locator, exclude_locators))
+        )
+
+    for document in documents:
+        body = read_document_body(epub, document.path, cache)
+
+        def visit(
+            element: XmlElement,
+            path: str,
+            previous: XmlElement | None,
+            *,
+            document: SpineDocument = document,
+        ) -> None:
+            locator = f"{document.path}#{path}"
+            rule = source_rule(element, content, locator, previous)
+            mark = markup_rule(element, content, locator, previous)
+            if rule is not None and rule.action == "skip":
+                return
+            if set(element.get(EPUB_TYPE, "").split()) & omitted_types:
+                if mark is not None:
+                    raise EpubBlocksError(
+                        f"{locator}: retained markup is also semantically omitted"
+                    )
+                return
+            tag = local_name(element.tag)
+            candidate = (
+                rule.action == "block"
+                if rule is not None
+                else (
+                    tag in primary_tags
+                    or (
+                        tag in fallback_tags
+                        and not _contains_primary_block(element, primary_tags)
+                    )
+                )
+            )
+            event = mark is not None and mark.kind == "milestone"
+            if candidate or event:
+                if not included(element, locator):
+                    return
+                tree = normalize_rich_text(
+                    build_rich_text(element, locator, content, omitted_types, previous),
+                    normalization,
+                )
+                text = plain_text(tree)
+                if text or (rule is not None and rule.keep_empty):
+                    blocks.append(
+                        TextBlock(
+                            document.position,
+                            document.path,
+                            path,
+                            tag,
+                            text,
+                            frozenset(element.get("class", "").split()),
+                        )
+                    )
+                elif detached is not None:
+                    for event_locator in milestones(tree):
+                        doc, element_path = event_locator.rsplit("#", 1)
+                        detached.append(Fragment(doc, element_path))
+                return
+            if content.strict_coverage and (element.text or "").strip():
+                raise EpubBlocksError(f"{locator}: unclaimed element text")
+            prev: XmlElement | None = None
+            for index, child in enumerate(element, 1):
+                visit(child, f"{path}.{index}", prev)
+                if content.strict_coverage and (child.tail or "").strip():
+                    raise EpubBlocksError(f"{locator}.{index}: unclaimed tail text")
+                prev = child
+
+        if content.strict_coverage and (body.text or "").strip():
+            raise EpubBlocksError(f"{document.path}#: unclaimed body text")
+        previous: XmlElement | None = None
+        for index, element in enumerate(body, 1):
+            visit(element, str(index), previous)
+            if content.strict_coverage and (element.tail or "").strip():
+                raise EpubBlocksError(f"{document.path}#{index}: unclaimed tail text")
+            previous = element
     if not blocks:
         raise EpubBlocksError(f"{source_path}: no text blocks matched the selection")
     return blocks

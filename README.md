@@ -28,6 +28,9 @@ The package:
 - generates flat and nested identifiers with per-group counters;
 - assigns output types through ordered source-block rules;
 - handles joins, splits, omissions, skipped blocks, and inserted material;
+- selects whole compound blocks and intentional empty structural blocks;
+- preserves recipe-selected spans and milestones as XML fragments or
+  configurable Unicode delimiters, without requiring new paragraph numbers;
 - pins both the EPUB and the compiled extraction plan with SHA-256; and
 - writes headerless `id`, `type`, `text` TSV records.
 
@@ -36,8 +39,10 @@ separately stored list of expected identifiers or types. Existing outputs may
 be useful as test oracles while authoring a recipe, but they are not recipe
 inputs and are not read by `epub-blocks`.
 
-The package does not compare editions, select preferred readings, or apply
-editorial corrections. Recipes describe source structure, not expected prose.
+The package does not compare editions, select preferred readings, apply
+editorial corrections, create witness manifests, or emit stand-off annotations.
+It can generate a marked-up TSV for a separate converter to derive plain text
+and stand-off together. Recipes describe source structure, not expected prose.
 
 ## Inspecting an EPUB
 
@@ -60,7 +65,10 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.3.0:
+Recipe version 1 remains the serialized format in epub-blocks 0.4.0.
+Existing 0.3.0 recipes keep their extracted fields and compiled digest when the
+optional new features are absent. TSV serialization now uses literal fields
+instead of CSV-style quoting:
 
 ```json
 {
@@ -139,6 +147,23 @@ See the
 and packaged
 [JSON Schema](https://github.com/jtauber/epub-blocks/blob/main/src/epub_blocks/schemas/recipe-v1.schema.json).
 
+## Optional marked-up text
+
+The recipe's `text.markup` object chooses `"format": "xml"` or
+`"format": "delimiters"`. Both serializers use the same structural rules,
+references, normalized text, and annotation boundaries. For example:
+
+```text
+XML:        A <em>quiet</em> word.<page label="iv"/>
+Delimiters: A ⧼quiet⧽ word.⟦iv⟧
+```
+
+Milestones between text blocks can attach to the following block without
+consuming a number. Trailing milestones require an explicit policy. Literal
+text is escaped so it cannot be mistaken for markup. See the
+[markup contract](docs/markup.md) for the complete configuration, grammar,
+escaping rules, normalization, slicing, and attachment semantics.
+
 ## Command line
 
 ```bash
@@ -146,7 +171,12 @@ epub-blocks book.epub recipe.json records.tsv
 ```
 
 The output is headerless TSV with `id`, `type`, and extracted `text` columns.
-Standard CSV quoting with a tab delimiter preserves tabs and line breaks.
+Fields are separated by literal tabs and records by LF. Quotes and backslashes
+are written unchanged: there is no CSV quoting, quote doubling, or TSV escaping.
+Embedded TAB, CR, or LF characters in any field are rejected rather than
+silently altering text or producing ambiguous rows. Normalize text or encode
+such characters in the markup before writing. A failed write leaves any
+existing output file intact.
 
 ## Python API
 

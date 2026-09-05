@@ -3,7 +3,35 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.4.0 - 2026-09-05
+
+- Add ordered structural source-element rules, explicit empty-block retention,
+  and opt-in checks for unclaimed source text.
+- Add configurable nested-block boundaries when extracting whole compound blocks.
+- Preserve spans and page/structural milestones in marked-up TSV, with XML
+  and configurable delimiter serializers sharing the same source rules.
+- Discover milestones outside nonempty blocks and attach them explicitly to
+  neighbouring output fragments without advancing reference counters.
+- Escape literal text and labels; preserve balanced markup through slices and
+  prefix removal; reject ambiguous Unicode normalization across retained markup.
+- Write plain TSV with literal quotes and backslashes, not CSV-style quoting.
+  Reject embedded TAB, CR, or LF in fields without replacing existing output.
+- Keep recipe format `"1"` and preserve no-feature 0.3.0 extracted fields and
+  compiled digests; serialized TSV hashes can change with the quoting removal.
+- Keep plain-text/stand-off conversion outside this package.
+- Honour explicit omissions and slices when resolving detached milestones;
+  do not reattach discarded events elsewhere.
+- Keep out-of-scope inserted notes out of main-text milestone attachment and
+  ordering checks; reject reversed slices when detached events need anchors.
+- Match selectors against original source structure after fragment omissions,
+  and ignore semantically omitted subtrees when checking milestone overlap.
+- Require actual booleans for compiled element-rule `keep_empty` values.
+- Do not introduce nested-block separators for structurally or semantically
+  omitted subtrees; preserve boundaries around empty retained blocks.
+- Pin trailing milestones to the last in-scope fragment, before any joined
+  auxiliary material and its separator.
+- Preserve hashes in EPUB-internal document paths when resolving detached
+  milestone locators.
 
 ## 0.3.0 - 2026-09-04
 

@@ -984,6 +984,48 @@ class GeneratedReferenceRecipeTests(unittest.TestCase):
             self.assertEqual(output.read_text(encoding="utf-8"), "original\n")
             self.assertEqual(list(output.parent.glob(".records.tsv.*.tmp")), [])
 
+    def test_tsv_writes_quotes_and_backslashes_literally(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "records.tsv"
+            text = '<page label="117"/>“A question?” "An answer." \\ literal'
+            blocks = [
+                ExtractedBlock('id"1', 'p"', text),
+                ExtractedBlock("empty", "gap", ""),
+                ExtractedBlock("quoted", "paragraph", '"Quoted from the start."'),
+            ]
+            write_tsv(output, blocks)
+            expected = (
+                'id"1\tp"\t' + text + "\nempty\tgap\t\n"
+                'quoted\tparagraph\t"Quoted from the start."\n'
+            )
+            self.assertEqual(output.read_bytes(), expected.encode("utf-8"))
+
+    def test_tsv_rejects_field_separators_without_replacing_existing_output(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "records.tsv"
+            output.write_text("original\n", encoding="utf-8")
+            for field_index, name in enumerate(("id", "type", "text")):
+                for char in ("\t", "\r", "\n"):
+                    fields = ["one", "paragraph", "text"]
+                    fields[field_index] += char
+                    with self.subTest(field=name, char=char):
+                        with self.assertRaisesRegex(
+                            EpubBlocksError, f"block 2, {name}"
+                        ):
+                            write_tsv(
+                                output,
+                                [
+                                    ExtractedBlock("valid", "p", "text"),
+                                    ExtractedBlock(*fields),
+                                ],
+                            )
+                        self.assertEqual(output.read_bytes(), b"original\n")
+                        self.assertEqual(
+                            list(output.parent.glob(".records.tsv.*.tmp")), []
+                        )
+
     def test_recipe_generates_groups_identifiers_types_and_lines(self) -> None:
         chapter = """<?xml version="1.0"?>
 <html xmlns="http://www.w3.org/1999/xhtml"><body>

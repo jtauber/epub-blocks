@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
@@ -8,27 +7,43 @@ import re
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from string import Formatter
 from typing import BinaryIO, cast
 from zipfile import BadZipFile, ZipFile
 
+from ._content import (
+    RichText,
+    boolean,
+    content_value,
+    element_rules,
+    join_rich_text,
+    milestones,
+    parse_text_options,
+    plain_text,
+    render_rich_text,
+    validate_content,
+)
 from .errors import EpubBlocksError
 from .extract import _extract_blocks_from_epub  # pyright: ignore[reportPrivateUsage]
 from .models import (
+    DEFAULT_CONTENT,
     CompiledBlock,
     CompiledRecipe,
+    ContentOptions,
+    ElementRule,
     EpubPackage,
     ExtractedBlock,
     Fragment,
     NormalizationOptions,
+    SpineDocument,
     TextBlock,
     UnicodeNormalization,
 )
-from .package import matches, read_epub_package
+from .package import matches, read_epub_package, select_spine_documents
 from .safety import DEFAULT_SAFETY_LIMITS, EpubArchive, SafetyLimits
-from .xhtml import extract_fragment, normalize_text
+from .xhtml import extract_fragment, extract_rich_fragment, normalize_text
 from .xml import XmlElement
 
 StrPath = str | os.PathLike[str]
@@ -76,6 +91,8 @@ class _SourceBlocksSpec:
     include_locators: tuple[str, ...]
     exclude_locators: tuple[str, ...]
     include_non_linear: bool
+    element_rules: tuple[ElementRule, ...]
+    strict_coverage: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +128,7 @@ class _EmissionSpec:
     block_type: str
     role: str
     block_id: str | None
+    allow_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +194,7 @@ class _RecipeSpec:
     omitted_types: frozenset[str]
     source_blocks: _SourceBlocksSpec
     output: _OutputSpec
+    content: ContentOptions = DEFAULT_CONTENT
 
 
 def _stream_sha256(source: BinaryIO) -> str:
@@ -411,6 +430,8 @@ def _source_blocks_spec(value: object, location: str) -> _SourceBlocksSpec:
                 "include_locators",
                 "exclude_locators",
                 "include_non_linear",
+                "element_rules",
+                "strict_coverage",
             }
         ),
         location,
@@ -433,6 +454,8 @@ def _source_blocks_spec(value: object, location: str) -> _SourceBlocksSpec:
             source.get("exclude_locators", []), f"{location}.exclude_locators"
         ),
         include_non_linear,
+        element_rules(source.get("element_rules", []), location + ".element_rules"),
+        boolean(source.get("strict_coverage", False), location + ".strict_coverage"),
     )
 
 
@@ -588,7 +611,12 @@ def _emission_spec(value: Mapping[str, object], location: str) -> _EmissionSpec:
             allowed_fields=frozenset({"group"}),
             required_fields=frozenset(),
         )
-    return _EmissionSpec(block_type, role, block_id)
+    return _EmissionSpec(
+        block_type,
+        role,
+        block_id,
+        boolean(value.get("allow_empty", False), location + ".allow_empty"),
+    )
 
 
 def _match_spec(value: object, location: str) -> _MatchSpec:
@@ -672,6 +700,7 @@ def _block_rule(value: object, location: str) -> _BlockRule:
                 "emit",
                 "separator",
                 "remove_prefix",
+                "allow_empty",
             }
         ),
         location,
@@ -775,7 +804,7 @@ def _produced_block(value: object, location: str) -> _ProducedBlockSpec:
     output = _mapping(value, location)
     _check_members(
         output,
-        frozenset({"type", "role", "id", "parts", "separator"}),
+        frozenset({"type", "role", "id", "parts", "separator", "allow_empty"}),
         location,
     )
     emission = _emission_spec(output, location)
@@ -827,7 +856,9 @@ def _output_spec(
     )
     default_value = _mapping(output.get("default"), f"{location}.default")
     _check_members(
-        default_value, frozenset({"type", "role", "id"}), f"{location}.default"
+        default_value,
+        frozenset({"type", "role", "id", "allow_empty"}),
+        f"{location}.default",
     )
     default = _emission_spec(default_value, f"{location}.default")
     rules_value = output.get("rules", [])
@@ -1000,6 +1031,7 @@ def _parse_recipe(
                 "omit_epub_types",
                 "source_blocks",
                 "output",
+                "text",
             }
         ),
         location,
@@ -1027,6 +1059,17 @@ def _parse_recipe(
         f"{location}.output",
         require_compiled_hash=require_compiled_hash,
     )
+    content = replace(
+        parse_text_options(recipe.get("text", {}), location + ".text"),
+        element_rules=source_blocks.element_rules,
+        strict_coverage=source_blocks.strict_coverage,
+    )
+    if content.markup is not None:
+        for rule in content.markup.rules:
+            if set(rule.match.epub_types) & omitted_types:
+                raise EpubBlocksError(
+                    f"{location}: retained markup is also semantically omitted"
+                )
     return _RecipeSpec(
         identifier,
         source_sha256,
@@ -1034,6 +1077,7 @@ def _parse_recipe(
         omitted_types,
         source_blocks,
         output,
+        content,
     )
 
 
@@ -1330,6 +1374,7 @@ def _compiled_produced_block(
         produced.parts,
         produced.separator,
         consumed_locators,
+        produced.emission.allow_empty,
     )
 
 
@@ -1515,6 +1560,8 @@ def _compile_blocks(
             else tuple(range(1, consume + 1))
         )
         emitted = [used[index - 1] for index in emit]
+        if not any(item.text for item in emitted) and not emission.allow_empty:
+            raise EpubBlocksError(f"{locator}: empty output requires allow_empty")
         if used[-1].locator in insertions and used[-1] not in emitted:
             raise EpubBlocksError(
                 f"source rule at {block.source_locator!r} discards insertion "
@@ -1548,6 +1595,7 @@ def _compile_blocks(
                 parts,
                 separator,
                 tuple(item.locator for item in used),
+                emission.allow_empty,
             )
         )
         add_insertions(used[-1].locator, group)
@@ -1699,6 +1747,34 @@ def compiled_recipe_digest(compiled: CompiledRecipe) -> str:
         }
         if separator:
             value["separator"] = separator
+        if not isinstance(cast(object, block.allow_empty), bool):
+            raise EpubBlocksError(f"{location}.allow_empty: must be a boolean")
+        if block.allow_empty:
+            value["allow_empty"] = True
+        for field, position_key, attachments, maximum in (
+            ("milestones", "before_part", block.milestones, len(block.parts)),
+            (
+                "milestones_after",
+                "after_part",
+                block.milestones_after,
+                len(block.parts) - 1,
+            ),
+        ):
+            if not attachments:
+                continue
+            entries: list[dict[str, object]] = []
+            for position, part in attachments:
+                if type(position) is not int or not 0 <= position <= maximum:
+                    raise EpubBlocksError(
+                        f"{location}.{field}: invalid milestone attachment"
+                    )
+                entries.append(
+                    {
+                        position_key: position,
+                        "source": _fragment_digest_value(part, location + ".milestone"),
+                    }
+                )
+            value[field] = entries
         blocks.append(value)
 
     value = {
@@ -1712,6 +1788,9 @@ def compiled_recipe_digest(compiled: CompiledRecipe) -> str:
         "reserved_locators": sorted(reserved),
         "blocks": blocks,
     }
+    policy = content_value(validate_content(compiled.content))
+    if policy:
+        value["content"] = policy
     encoded = json.dumps(
         value,
         ensure_ascii=False,
@@ -1730,7 +1809,57 @@ def _extract_joined_parts(
     document_cache: dict[str, XmlElement],
     *,
     location: str,
+    content: ContentOptions = DEFAULT_CONTENT,
+    allow_empty: bool = False,
+    attachments: tuple[tuple[int, Fragment], ...] = (),
+    attachments_after: tuple[tuple[int, Fragment], ...] = (),
 ) -> str:
+    if content != ContentOptions():
+
+        def events_at(
+            events: tuple[tuple[int, Fragment], ...], position: int
+        ) -> tuple[str | RichText, ...]:
+            return tuple(
+                child
+                for index, event in events
+                if index == position
+                for child in extract_rich_fragment(
+                    epub,
+                    event,
+                    cache=document_cache,
+                    normalization=normalization,
+                    omit_epub_types=omitted_types,
+                    content=content,
+                ).children
+            )
+
+        trees: list[RichText] = []
+        for index, part in enumerate(parts):
+            tree = extract_rich_fragment(
+                epub,
+                part,
+                cache=document_cache,
+                normalization=normalization,
+                omit_epub_types=omitted_types,
+                content=content,
+            )
+            trees.append(
+                replace(
+                    tree,
+                    children=(
+                        events_at(attachments, index)
+                        + tree.children
+                        + events_at(attachments_after, index)
+                    ),
+                )
+            )
+        joined = join_rich_text(trees, separator, normalization)
+        joined = replace(
+            joined, children=joined.children + events_at(attachments, len(parts))
+        )
+        if not plain_text(joined) and not allow_empty:
+            raise EpubBlocksError(f"{location}: extraction produced no text")
+        return render_rich_text(joined, content.markup)
     extracted: list[str] = []
     for part in parts:
         text = extract_fragment(
@@ -1744,7 +1873,7 @@ def _extract_joined_parts(
             text = normalize_text(text, normalization)
         extracted.append(text)
     text = normalize_text(separator.join(extracted), normalization)
-    if not text:
+    if not text and not allow_empty:
         raise EpubBlocksError(f"{location}: extraction produced no text")
     return text
 
@@ -1761,6 +1890,74 @@ def _prepare_recipe(
     return path, spec
 
 
+def _attach_milestones(
+    blocks: tuple[CompiledBlock, ...],
+    detached: Sequence[Fragment],
+    documents: Sequence[SpineDocument],
+    content: ContentOptions,
+) -> tuple[CompiledBlock, ...]:
+    if not detached:
+        return blocks
+    markup = content.markup
+    if markup is None:
+        raise EpubBlocksError("detached milestones require markup configuration")
+    positions = {doc.path: doc.position for doc in documents}
+
+    def key(part: Fragment) -> tuple[int, tuple[int, ...], int]:
+        return (
+            positions[part.document_path],
+            tuple(int(item) for item in part.element_path.split(".") if item),
+            part.start or 0,
+        )
+
+    anchors = [
+        (key(part), block_index, part_index)
+        for block_index, block in enumerate(blocks)
+        for part_index, part in enumerate(block.parts)
+        if part.document_path in positions
+    ]
+    if not anchors:
+        raise EpubBlocksError(
+            "detached milestones require output fragments from selected source documents"
+        )
+    if [item[0] for item in anchors] != sorted(item[0] for item in anchors):
+        raise EpubBlocksError(
+            "detached milestones require source-ordered output fragments"
+        )
+    attachments: dict[int, list[tuple[int, Fragment]]] = defaultdict(list)
+    attachments_after: dict[int, list[tuple[int, Fragment]]] = defaultdict(list)
+    cursor = 0
+    for event in detached:
+        while cursor < len(anchors) and anchors[cursor][0] < key(event):
+            cursor += 1
+        if cursor < len(anchors):
+            if markup.between_blocks != "next":
+                raise EpubBlocksError(
+                    f"{_fragment_locator(event)}: detached milestone needs between_blocks: next"
+                )
+            _, block_index, part_index = anchors[cursor]
+            attachments[block_index].append((part_index, event))
+        else:
+            if markup.trailing != "previous":
+                raise EpubBlocksError(
+                    f"{_fragment_locator(event)}: trailing milestone needs trailing: previous"
+                )
+            _, block_index, part_index = anchors[-1]
+            if part_index == len(blocks[block_index].parts) - 1:
+                # Preserve the existing block-end representation and digest.
+                attachments[block_index].append((len(blocks[block_index].parts), event))
+            else:
+                attachments_after[block_index].append((part_index, event))
+    return tuple(
+        replace(
+            block,
+            milestones=tuple(attachments[index]),
+            milestones_after=tuple(attachments_after[index]),
+        )
+        for index, block in enumerate(blocks)
+    )
+
+
 def _compile_from_epub(
     path: Path,
     spec: _RecipeSpec,
@@ -1775,6 +1972,7 @@ def _compile_from_epub(
             f"{path}: expected package identifier {spec.identifier!r} not found"
         )
     source = spec.source_blocks
+    detached: list[Fragment] = []
     candidates = _extract_blocks_from_epub(
         epub,
         package,
@@ -1788,6 +1986,8 @@ def _compile_from_epub(
         omit_epub_types=spec.omitted_types,
         normalization=spec.normalization,
         document_cache=document_cache,
+        content=spec.content,
+        detached_milestones=detached,
     )
     for category, special_outputs in (
         ("replacement", spec.output.replacements),
@@ -1803,8 +2003,50 @@ def _compile_from_epub(
                     spec.omitted_types,
                     document_cache,
                     location=(f"output {category} {item_index}, output {output_index}"),
+                    content=spec.content,
+                    allow_empty=produced.emission.allow_empty,
                 )
     blocks, skipped, reserved = _compile_blocks(candidates, spec)
+    if spec.content != ContentOptions():
+        retained_events: set[str] = set()
+        selected_roots: dict[str, set[str]] = defaultdict(set)
+        for block in blocks:
+            for part in block.parts:
+                selected_roots[part.document_path].add(part.element_path)
+                tree = extract_rich_fragment(
+                    epub,
+                    part,
+                    cache=document_cache,
+                    normalization=spec.normalization,
+                    omit_epub_types=spec.omitted_types,
+                    content=spec.content,
+                )
+                for locator in milestones(tree):
+                    if locator in retained_events:
+                        raise EpubBlocksError(
+                            f"{locator}: milestone is emitted more than once"
+                        )
+                    retained_events.add(locator)
+
+        def claimed(event: Fragment) -> bool:
+            # A selected fragment owns its subtree, including markers explicitly
+            # discarded by its omissions or slice. Do not relocate those markers.
+            roots = selected_roots[event.document_path]
+            path = event.element_path
+            while path:
+                if path in roots:
+                    return True
+                path = path.rpartition(".")[0]
+            return "" in roots
+
+        detached = [event for event in detached if not claimed(event)]
+    documents = select_spine_documents(
+        package,
+        source.include_documents,
+        source.exclude_documents,
+        include_non_linear=source.include_non_linear,
+    )
+    blocks = _attach_milestones(blocks, detached, documents, spec.content)
     compiled = CompiledRecipe(
         spec.identifier,
         spec.sha256,
@@ -1813,6 +2055,7 @@ def _compile_from_epub(
         blocks,
         skipped,
         reserved,
+        spec.content,
     )
     actual_digest = compiled_recipe_digest(compiled)
     if verify_digest and spec.output.compiled_sha256 != actual_digest:
@@ -1897,6 +2140,10 @@ def _extract_compiled_from_epub(
             compiled.omit_epub_types,
             document_cache,
             location=location,
+            content=compiled.content,
+            allow_empty=block.allow_empty,
+            attachments=block.milestones,
+            attachments_after=block.milestones_after,
         )
         result.append(ExtractedBlock(block.block_id, block.block_type, text))
     return result
@@ -1963,7 +2210,10 @@ def extract_recipe_file(
 
 
 def write_tsv(path: StrPath, blocks: Iterable[ExtractedBlock]) -> None:
-    """Atomically write headerless identifier/type/text records as TSV."""
+    """Atomically write literal tab-separated fields, without quoting or escaping.
+
+    Tabs, carriage returns, and line feeds within fields are rejected.
+    """
 
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1979,10 +2229,15 @@ def write_tsv(path: StrPath, blocks: Iterable[ExtractedBlock]) -> None:
             delete=False,
         ) as output:
             temporary_path = Path(output.name)
-            writer = csv.writer(output, delimiter="\t", lineterminator="\n")
-            writer.writerows(
-                (block.block_id, block.block_type, block.text) for block in blocks
-            )
+            for index, block in enumerate(blocks, 1):
+                fields = (block.block_id, block.block_type, block.text)
+                for name, value in zip(("id", "type", "text"), fields, strict=True):
+                    if any(char in value for char in ("\t", "\r", "\n")):
+                        raise EpubBlocksError(
+                            f"block {index}, {name}: plain TSV fields cannot contain "
+                            "TAB, CR, or LF; normalize or encode them before writing"
+                        )
+                output.write("\t".join(fields) + "\n")
             output.flush()
             os.fsync(output.fileno())
         temporary_path.replace(output_path)

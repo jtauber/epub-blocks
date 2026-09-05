@@ -1,7 +1,7 @@
 # Recipe format
 
 This document specifies `epub-blocks` recipe version 1 as implemented by
-epub-blocks 0.3.0. A recipe is a self-contained structural program that turns
+epub-blocks 0.4.0. A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
 The recipe generates its output identifiers and types. It does not refer to a
@@ -19,6 +19,7 @@ it is not a runtime input.
 | `normalization` | no | Controls text normalization. |
 | `omit_epub_types` | no | Removes descendants with listed EPUB semantic types. |
 | `source_blocks` | yes | Selects candidate source blocks. |
+| `text` | no | Nested-block boundaries and optional XML/delimiter markup. |
 | `output` | yes | Defines groups, identifiers, types, and exceptions. |
 
 Unknown members, duplicate JSON members, `NaN`, and infinities are errors.
@@ -51,6 +52,10 @@ SHA-256 of the complete EPUB file.
 The defaults are shown. Unicode normalization can be `NFC`, `NFD`, `NFKC`,
 `NFKD`, or `none`.
 
+The steps below describe plain-text extraction without the new content
+policies. With `text.markup`, normalization operates on text before marker
+serialization; see the [markup contract](markup.md#normalization-and-structural-transformations).
+
 For each fragment, operations occur in this order:
 
 1. Explicitly omitted descendants are removed.
@@ -81,7 +86,9 @@ while its tail text is preserved. The default is empty. A typical recipe uses
 - `exclude_classes`: exact class tokens compared case-insensitively;
 - `include_locators`: case-insensitive `document#element-path` globs;
 - `exclude_locators`: locator globs applied after inclusion; and
-- `include_non_linear`: include `linear="no"` spine items; default `false`.
+- `include_non_linear`: include `linear="no"` spine items; default `false`;
+- `element_rules`: ordered structural selection overrides; default empty;
+- `strict_coverage`: report unclaimed non-whitespace source text; default `false`.
 
 Document and locator selection are conjunctive. Locator inclusion cannot bring
 back an excluded document.
@@ -90,9 +97,88 @@ Candidate elements are `p`, `h1` through `h6`, and `pre`. A `blockquote` or `li`
 is a candidate only when it has no primary candidate descendant. Candidates
 remain in spine and document order. Empty normalized blocks are discarded.
 
+These are the defaults; explicit source-element rules can override the
+candidate boundary and retain deliberate empty elements as described below.
+
 The stable local locator syntax is `document#element-path`, for example
 `text/chapter-01.xhtml#1.3.2`. Element paths are dot-separated, one-based child
 positions within the XHTML `body`.
+
+### Structural element selectors
+
+Source-element and markup rules use a structural selector. All supplied
+criteria must pass:
+
+| Criterion | Meaning |
+| --- | --- |
+| `tag` | Case-insensitive local tag name |
+| `classes` | Exact set of class tokens, including `[]` for no classes |
+| `classes_any`, `classes_all` | Any/all exact, case-sensitive tokens |
+| `locators` | Any case-insensitive EPUB-local locator glob |
+| `epub_types` | All exact tokens must occur in `epub:type` |
+| `attributes` | Map of exact XML attribute names to exact string values |
+| `empty` | Whether the subtree's raw text is entirely whitespace |
+| `previous_sibling` | A selector for the immediately preceding element sibling |
+| `has_child` | A selector matching at least one immediate child element |
+
+The two contextual selectors cannot themselves contain contextual selectors.
+They use original source structure, not a previous emitted row; comments are
+not elements. Fragment omissions do not renumber source locators or change
+the children, sibling context, or raw text inspected by selectors. A selector
+must contain at least one effective criterion.
+Empty arrays other than `classes`, and an empty attribute map, impose no
+restriction. Structural selectors do not accept regular-expression text
+matching. Output-rule `match` retains its separate `text_pattern` vocabulary.
+
+### Ordered source-element rules
+
+```json
+"element_rules": [
+  {"match": {"tag": "li"}, "action": "block"},
+  {"match": {"tag": "aside", "classes_all": ["navigation"]}, "action": "skip"},
+  {
+    "match": {"tag": "div", "classes_all": ["scene"]},
+    "action": "block",
+    "keep_empty": true
+  }
+]
+```
+
+The first matching rule wins. `block` selects the complete subtree without
+also emitting descendants. `descend` visits children instead of selecting the
+current element. `skip` excludes the subtree while retaining its tail in a
+selected parent. No match retains the existing candidate defaults. Skips also
+apply inside selected whole blocks. `keep_empty` is only valid with `block`;
+to emit an empty row, its output emission also needs `allow_empty: true`.
+
+Document and candidate class/locator filters still apply. A rule cannot bring
+back an excluded document or candidate. With `strict_coverage: true`, text not
+covered by selected subtrees or deliberate exclusions is an error. This
+includes text before/after nested blocks, body text, and child tails. Errors
+identify source locations without dumping prose. Non-textual structure still
+needs inspection: a text-coverage check cannot detect an unconfigured empty
+scene separator or page marker.
+
+## Text handling
+
+```json
+"text": {
+  "block_boundaries": {"tags": ["p", "li"], "separator": " "}
+}
+```
+
+The optional `block_boundaries` inserts its nonempty, whitespace-only separator
+at entry and exit of configured nested block tags inside a selected fragment.
+It does not surround the selected root. Normalization applies afterwards.
+For example, a selected `<li>Open.<p>Another.</p>Tail.</li>` becomes
+`Open. Another. Tail.`. Inline wrappers still join `in<em>side</em>` as `inside`.
+The default tag list is empty, preserving the old flattening behaviour.
+
+The other optional member is `text.markup`, fully specified in
+[Marked-up text](markup.md). It supports XML fragments or configurable
+delimiters, spans, attribute-labeled milestones, escaping, and explicit
+between-block attachment policies. Both serializers preserve the same
+references and underlying normalized text.
 
 ## Output
 
@@ -225,6 +311,12 @@ Every emission has a nonempty `type` and one of four roles:
   current group; or
 - `fixed`: render the required `id`, which can contain `{group}` but does not
   advance a counter.
+
+An emission may also set `allow_empty: true` (default `false`). This permits
+an intentionally empty output but does not itself retain empty source
+candidates; use `keep_empty` for those. The flag is available in defaults,
+rules, replacement outputs, and insertion outputs. It does not turn an empty
+slice or a prefix consuming all text into a valid transformation.
 
 An `id` is only allowed for `fixed`. A line role requires a line template, and
 `line` without a preceding `line-start` in the same group is an error. Every
@@ -449,6 +541,14 @@ values. `write_tsv` and the CLI write headerless columns:
 1. generated `id`;
 2. generated `type`;
 3. extracted `text`.
+
+The file is UTF-8, with literal TAB field separators and LF record endings.
+There is no CSV quoting or escaping: quotes and backslashes are ordinary field
+characters. Read each record by splitting on literal tabs, not with a CSV
+reader's default quote handling. Embedded TAB, CR, or LF characters in any
+field are rejected; the writer does not normalize them or replace the existing
+output file on failure. XML character references can represent these characters
+inside markup without introducing raw field/record separators.
 
 ```bash
 epub-blocks book.epub recipe.json records.tsv
