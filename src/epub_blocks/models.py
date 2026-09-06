@@ -32,6 +32,15 @@ class ElementRule:
 
 
 @dataclass(frozen=True)
+class BoundaryRule:
+    """Whitespace before/after a retained nested element; first match wins."""
+
+    match: ElementSelector
+    before: str = ""
+    after: str = ""
+
+
+@dataclass(frozen=True)
 class MarkupRule:
     """A source selector and its span or milestone representation."""
 
@@ -61,6 +70,7 @@ class ContentOptions:
     boundary_tags: tuple[str, ...] = ()
     boundary_separator: str = " "
     markup: MarkupOptions | None = None
+    boundary_rules: tuple[BoundaryRule, ...] = ()
 
 
 DEFAULT_CONTENT = ContentOptions()

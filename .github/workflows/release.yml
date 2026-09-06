@@ -1,8 +1,12 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -18,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: ${{ matrix.python-version }}
@@ -45,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.sha }}
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: "3.13"
@@ -53,7 +57,7 @@ jobs:
       - run: uv sync --locked
       - name: Verify release tag matches the package version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           uv run python - <<'PY'
           import os
@@ -170,7 +174,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    needs: build
+    needs: publish-to-github
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -183,9 +187,12 @@ jobs:
           name: python-package-distributions
           path: dist/
       - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          # Retries use the same checked artifacts, already frozen on GitHub.
+          skip-existing: true
 
   publish-to-github:
-    name: Attach distributions to GitHub release
+    name: Stage assets and publish immutable GitHub release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -195,8 +202,39 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
-      - run: >-
-          gh release upload "$GITHUB_REF_NAME" dist/*
-          --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Publish the checked distributions
+        shell: bash
+        run: |
+          # No release is published until both distributions have been attached
+          # and downloaded again for a byte-for-byte comparison.
+          if draft=$(gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft); then
+            case "$draft" in
+              true|false) ;;
+              *) echo "Unexpected release state: $draft" >&2; exit 1 ;;
+            esac
+          else
+            # A failed lookup is not proof of absence: create fails safely if
+            # the release actually exists or GitHub is unavailable.
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes
+            draft=true
+          fi
+
+          if [ "$draft" = true ]; then
+            # Only drafts may replace assets, including on a partial retry.
+            gh release upload "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+
+          verification_dir=$(mktemp -d)
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --dir "$verification_dir"
+          diff --recursive --brief dist "$verification_dir"
+
+          if [ "$draft" = true ]; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
         env:
           GH_TOKEN: ${{ github.token }}

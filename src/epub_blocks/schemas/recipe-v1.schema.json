@@ -1082,6 +1082,23 @@
         }
       ]
     },
+    "boundaryWhitespace": {
+      "description": "Nonempty Python whitespace; explicit code points keep ECMA-262 and Python validators consistent.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[\\u0009-\\u000D\\u001C-\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+$"
+    },
+    "boundaryRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["match"],
+      "anyOf": [{"required": ["before"]}, {"required": ["after"]}],
+      "properties": {
+        "match": {"$ref": "#/$defs/elementSelector"},
+        "before": {"$ref": "#/$defs/boundaryWhitespace"},
+        "after": {"$ref": "#/$defs/boundaryWhitespace"}
+      }
+    },
     "markupRule": {
       "type": "object",
       "additionalProperties": false,
@@ -1189,10 +1206,13 @@
             "tags": {
               "$ref": "#/$defs/stringArray"
             },
+            "rules": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/boundaryRule"},
+              "default": []
+            },
             "separator": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^\\s+$",
+              "$ref": "#/$defs/boundaryWhitespace",
               "default": " "
             }
           }

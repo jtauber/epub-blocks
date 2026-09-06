@@ -29,6 +29,8 @@ The package:
 - assigns output types through ordered source-block rules;
 - handles joins, splits, omissions, skipped blocks, and inserted material;
 - selects whole compound blocks and intentional empty structural blocks;
+- inserts recipe-selected whitespace before/after nested elements without
+  splitting ordinary inline word wrappers;
 - preserves recipe-selected spans and milestones as XML fragments or
   configurable Unicode delimiters, without requiring new paragraph numbers;
 - pins both the EPUB and the compiled extraction plan with SHA-256; and
@@ -65,10 +67,10 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.4.0.
-Existing 0.3.0 recipes keep their extracted fields and compiled digest when the
-optional new features are absent. TSV serialization now uses literal fields
-instead of CSV-style quoting:
+Recipe version 1 remains the serialized format in epub-blocks 0.5.0.
+Existing 0.4.0 recipes keep their extracted fields and compiled digest when
+new boundary rules are absent. TSV serialization uses literal fields, as in
+0.4.0, instead of CSV-style quoting:
 
 ```json
 {
@@ -164,6 +166,31 @@ text is escaped so it cannot be mistaken for markup. See the
 [markup contract](docs/markup.md) for the complete configuration, grammar,
 escaping rules, normalization, slicing, and attachment semantics.
 
+## Selective whitespace
+
+A recipe can distinguish layout spans from ordinary word wrappers:
+
+```json
+"text": {
+  "block_boundaries": {
+    "tags": ["p", "li"],
+    "separator": " ",
+    "rules": [
+      {"match": {"tag": "span", "classes_all": ["space"]}, "before": " "}
+    ]
+  }
+}
+```
+
+This inserts a space before a retained nested `span.space`, including an
+empty one, without discarding its contents. Add `after` for a trailing space.
+Other spans remain transparent. Rules are first-match-wins and override the
+tag shorthand for a matching element. Whitespace enters the character stream
+before normalization and slicing; optional markup can record its source
+without losing the space when markup is removed. See the
+[boundary specification](docs/recipe-format.md#selective-boundaries-050) and
+[spacing/markup contract](docs/markup.md#spacing-and-markup).
+
 ## Command line
 
 ```bash
@@ -189,6 +216,13 @@ for record in records:
 ```
 
 `compile_recipe_file` returns the immutable in-memory extraction plan.
+For recipe authoring, `extract_recipe_candidates(epub_path, recipe)` returns
+source blocks with locators, tags, classes, and plain normalized text, using
+the recipe's source-element and text policies. It checks the EPUB hash and
+identifier but does not apply output rules or require/verify the compiled-plan
+digest. A syntactically valid draft output section is still required; use
+`load_recipe` to read JSON. Final output references, coverage, and detached
+milestone placement are checked by compilation, not candidate inspection.
 `Fragment` and `extract_fragments` provide lower-level access to selected XHTML
 subtrees. The supported import surface is the names exported by `epub_blocks`.
 

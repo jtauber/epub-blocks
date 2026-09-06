@@ -3,6 +3,25 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.0 - 2026-09-06
+
+- Add `extract_recipe_candidates` for source inspection with the same
+  structural selection and text policies used by recipe compilation.
+- Add ordered, source-selective whitespace boundary rules with independent
+  before/after insertion, preserving text inside matched elements.
+- Keep whitespace insertion independent of optional retained spacing markup;
+  normalize and slice the resulting character stream consistently in both
+  XML and delimiter output.
+- Keep recipe format `"1"` and existing compiled digests unchanged when new
+  boundary rules are absent.
+- Expand regression coverage for archive safety, source ambiguity, compiled
+  plan validation, and markup edge cases; raise the coverage floor to 98%.
+- Make schema whitespace validation agree with the runtime in both Python
+  and JavaScript, including Unicode whitespace and the exclusion of U+FEFF.
+- Trigger releases from version tags, attach and verify distributions while
+  the GitHub release is still a draft, and publish to PyPI only after the
+  immutable GitHub release succeeds; safely resume partial publication.
+
 ## 0.4.0 - 2026-09-05
 
 - Add ordered structural source-element rules, explicit empty-block retention,

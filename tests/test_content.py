@@ -27,15 +27,90 @@ from epub_blocks import (
     ElementSelector,
     EpubBlocksError,
     Fragment,
+    SafetyLimits,
     compile_recipe,
     compiled_recipe_digest,
     extract_recipe,
+    extract_recipe_candidates,
     write_tsv,
 )
 from epub_blocks.models import ContentOptions
 
 
 class ContentTests(unittest.TestCase):
+    def test_recipe_candidates_share_table_selection_and_normalization(self) -> None:
+        epub, recipe = self.sample(
+            '<h1>Title</h1><table><tr><td class="label">PS.</td>'
+            "<td>One <em>two</em></td></tr></table><p>End.</p>"
+        )
+        recipe["source_blocks"] = {
+            "include_documents": ["text/chapter.xhtml"],
+            "element_rules": [{"match": {"tag": "td"}, "action": "block"}],
+            "strict_coverage": True,
+        }
+        candidates = extract_recipe_candidates(epub, recipe)
+        self.assertEqual(
+            [b.text for b in candidates], ["Title", "PS.", "One two", "End."]
+        )
+        self.assertEqual(candidates[1].locator, "text/chapter.xhtml#2.1.1")
+        self.assertEqual(candidates[1].classes, frozenset({"label"}))
+        self.assertEqual(candidates[1].tag, "td")
+        self.assertEqual(
+            [b.text for b in candidates], [t for _, t in self.output(epub, recipe)]
+        )
+
+    def test_recipe_candidates_validate_source_identity_and_rules(self) -> None:
+        epub, recipe = self.sample("<p>Text.</p>")
+        for identifier, digest, message in [
+            ("sample-edition", "0" * 64, "source SHA-256"),
+            ("wrong", hashlib.sha256(epub.read_bytes()).hexdigest(), "identifier"),
+        ]:
+            with self.subTest(identifier=identifier):
+                recipe["epub"] = {"identifier": identifier, "sha256": digest}
+                with self.assertRaisesRegex(EpubBlocksError, message):
+                    extract_recipe_candidates(epub, recipe)
+        recipe["unknown"] = True
+        with self.assertRaisesRegex(EpubBlocksError, "unknown"):
+            extract_recipe_candidates(epub, recipe)
+
+    def test_recipe_candidates_do_not_apply_output_or_require_digest(self) -> None:
+        epub, recipe = self.sample("<p>First.</p><p>Second.</p>")
+        recipe["output"] = {
+            "identifiers": {"block": {"template": "{number}"}},
+            "default": {"type": "paragraph"},
+            "skip_source": ["text/chapter.xhtml#1"],
+        }
+        candidates = extract_recipe_candidates(epub, recipe)
+        self.assertEqual([b.text for b in candidates], ["First.", "Second."])
+        self.assertEqual(self.output(epub, recipe), [("1", "Second.")])
+
+    def test_recipe_candidates_report_unclaimed_text(self) -> None:
+        epub, recipe = self.sample("<div>Unclaimed.</div><p>Claimed.</p>")
+        recipe["source_blocks"] = {"strict_coverage": True}
+        with self.assertRaisesRegex(EpubBlocksError, "unclaimed"):
+            extract_recipe_candidates(epub, recipe)
+
+    def test_recipe_candidates_preserve_archive_safety_checks(self) -> None:
+        epub, recipe = self.sample("<p>Text.</p>")
+        with self.assertRaisesRegex(EpubBlocksError, "too many archive members"):
+            extract_recipe_candidates(
+                epub, recipe, limits=SafetyLimits(max_archive_members=1)
+            )
+        epub.write_bytes(b"not a zip archive")
+        recipe["epub"] = {
+            "identifier": "sample-edition",
+            "sha256": hashlib.sha256(epub.read_bytes()).hexdigest(),
+        }
+        with self.assertRaisesRegex(EpubBlocksError, "not a valid ZIP"):
+            extract_recipe_candidates(epub, recipe)
+
+    def test_recipe_candidates_return_plain_text_for_markup_recipes(self) -> None:
+        epub, recipe = self.sample("<p>Text <em>here</em>.</p>")
+        self.markup(recipe)
+        candidates = extract_recipe_candidates(epub, recipe)
+        self.assertEqual([b.text for b in candidates], ["Text here."])
+        self.assertEqual(self.output(epub, recipe), [("001", "Text <em>here</em>.")])
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

@@ -11,6 +11,7 @@ from typing import cast
 
 from .errors import EpubBlocksError
 from .models import (
+    BoundaryRule,
     ContentOptions,
     ElementRule,
     ElementSelector,
@@ -193,23 +194,43 @@ def markup_options(value: object, location: str) -> MarkupOptions:
     return MarkupOptions(format_name, tuple(rules), tuple(pairs), between, trailing)
 
 
+def whitespace(value: object, location: str) -> str:
+    # The schema's boundaryWhitespace explicitly enumerates this character set;
+    # ECMA-262 \s differs from Python's definition. Tests keep them in agreement.
+    if not isinstance(value, str) or not value or not value.isspace():
+        raise EpubBlocksError(f"{location}: must be nonempty whitespace")
+    return value
+
+
+def boundary_rules(value: object, location: str) -> tuple[BoundaryRule, ...]:
+    result: list[BoundaryRule] = []
+    for index, item in enumerate(array(value, location), 1):
+        at = f"{location}[{index}]"
+        rule = object_value(item, at)
+        members(rule, {"match", "before", "after"}, at)
+        if "before" not in rule and "after" not in rule:
+            raise EpubBlocksError(f"{at}: requires before and/or after whitespace")
+        result.append(
+            BoundaryRule(
+                selector(rule.get("match"), at + ".match"),
+                whitespace(rule["before"], at + ".before") if "before" in rule else "",
+                whitespace(rule["after"], at + ".after") if "after" in rule else "",
+            )
+        )
+    return tuple(result)
+
+
 def parse_text_options(value: object, location: str) -> ContentOptions:
     spec = object_value(value, location)
     members(spec, {"block_boundaries", "markup"}, location)
     boundary = object_value(
         spec.get("block_boundaries", {}), location + ".block_boundaries"
     )
-    members(boundary, {"tags", "separator"}, location + ".block_boundaries")
+    members(boundary, {"tags", "separator", "rules"}, location + ".block_boundaries")
     tags = strings(boundary.get("tags", []), location + ".block_boundaries.tags")
-    separator_value = boundary.get("separator", " ")
-    if (
-        not isinstance(separator_value, str)
-        or not separator_value
-        or not separator_value.isspace()
-    ):
-        raise EpubBlocksError(
-            f"{location}.block_boundaries.separator: must be nonempty whitespace"
-        )
+    separator_value = whitespace(
+        boundary.get("separator", " "), location + ".block_boundaries.separator"
+    )
     markup = (
         markup_options(spec["markup"], location + ".markup")
         if "markup" in spec
@@ -219,6 +240,9 @@ def parse_text_options(value: object, location: str) -> ContentOptions:
         boundary_tags=tuple(sorted(tag.casefold() for tag in tags)),
         boundary_separator=separator_value if tags else " ",
         markup=markup,
+        boundary_rules=boundary_rules(
+            boundary.get("rules", []), location + ".block_boundaries.rules"
+        ),
     )
 
 
@@ -257,11 +281,22 @@ def content_value(content: ContentOptions) -> dict[str, object]:
         ]
     if content.strict_coverage:
         result["strict_coverage"] = True
-    if content.boundary_tags:
-        result["block_boundaries"] = {
-            "tags": list(content.boundary_tags),
-            "separator": content.boundary_separator,
-        }
+    if content.boundary_tags or content.boundary_rules:
+        boundaries: dict[str, object] = {}
+        if content.boundary_tags:
+            boundaries.update(
+                tags=list(content.boundary_tags), separator=content.boundary_separator
+            )
+        if content.boundary_rules:
+            boundaries["rules"] = [
+                {
+                    "match": selector_value(rule.match),
+                    **({"before": rule.before} if rule.before else {}),
+                    **({"after": rule.after} if rule.after else {}),
+                }
+                for rule in content.boundary_rules
+            ]
+        result["block_boundaries"] = boundaries
     if content.markup is not None:
         markup = content.markup
         result["markup"] = {
@@ -402,6 +437,20 @@ def markup_rule(
     )
 
 
+def boundary_spacing(
+    element: XmlElement,
+    content: ContentOptions,
+    locator: str,
+    previous: XmlElement | None,
+) -> tuple[str, str]:
+    for rule in content.boundary_rules:
+        if matches_element(element, rule.match, locator, previous):
+            return rule.before, rule.after
+    if local_name(element.tag).casefold() in content.boundary_tags:
+        return content.boundary_separator, content.boundary_separator
+    return "", ""
+
+
 @dataclass(frozen=True)
 class RichText:
     """Internal tree, not a public stand-off output."""
@@ -510,12 +559,17 @@ def build_rich_text(
             retained = visit(child, child_locator(at, index), prev_child, False)
             # None means omitted, unlike an empty but retained structural block.
             if retained is not None:
-                nested = local_name(child.tag).casefold() in content.boundary_tags
-                if nested:
-                    pieces.append(content.boundary_separator)
+                child_at, original_child, original_previous = source_context(
+                    child, child_locator(at, index), prev_child
+                )
+                before, after = boundary_spacing(
+                    original_child, content, child_at, original_previous
+                )
+                if before:
+                    pieces.append(before)
                 pieces.extend(retained)
-                if nested:
-                    pieces.append(content.boundary_separator)
+                if after:
+                    pieces.append(after)
             if child.tail:
                 pieces.append(child.tail)
             prev_child = child

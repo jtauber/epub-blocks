@@ -1,7 +1,7 @@
 # Recipe format
 
 This document specifies `epub-blocks` recipe version 1 as implemented by
-epub-blocks 0.4.0. A recipe is a self-contained structural program that turns
+epub-blocks 0.5.0. A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
 The recipe generates its output identifiers and types. It does not refer to a
@@ -173,6 +173,74 @@ It does not surround the selected root. Normalization applies afterwards.
 For example, a selected `<li>Open.<p>Another.</p>Tail.</li>` becomes
 `Open. Another. Tail.`. Inline wrappers still join `in<em>side</em>` as `inside`.
 The default tag list is empty, preserving the old flattening behaviour.
+
+For `separator` and the rule sides below, whitespace means the characters
+accepted by Python's `str.isspace()`: U+0009–U+000D, U+001C–U+0020, U+0085,
+U+00A0, U+1680, U+2000–U+200A, U+2028, U+2029, U+202F, U+205F, and U+3000.
+In particular, U+0085 and U+001C are accepted, while U+FEFF (BOM/zero-width
+no-break space) is not. The JSON Schema lists these code points explicitly,
+so JavaScript and Python validators use the same definition. This does not
+relax the output format: literal TAB, CR, and LF still cannot appear in TSV
+fields, and XML output still rejects characters that XML cannot represent.
+
+### Selective boundaries (0.5.0)
+
+`block_boundaries.rules` adds ordered structural rules for cases such as a
+CSS-spaced inline span that would otherwise join adjacent words:
+
+```json
+"text": {
+  "block_boundaries": {
+    "tags": ["p", "li"],
+    "separator": " ",
+    "rules": [
+      {
+        "match": {"tag": "span", "classes_all": ["space"]},
+        "before": " "
+      },
+      {
+        "match": {"tag": "span", "classes_all": ["separated"]},
+        "before": " ",
+        "after": " "
+      }
+    ]
+  }
+}
+```
+
+Each rule requires a `match` using the existing structural-selector vocabulary
+and at least one of `before` or `after`. Each supplied side must be a nonempty,
+whitespace-only string; omit a side to insert nothing there. Empty strings,
+`null`, booleans, and replacement prose are errors. The two sides can use
+different whitespace. The surrounding `separator` applies only to `tags`,
+not as a default for a rule's sides. `rules` defaults to an empty array.
+
+Rules are first-match-wins. A matching rule replaces the tag shorthand for
+that element, rather than adding to it. If no rule matches, an element whose
+tag occurs in `tags` receives the existing separator on both sides. No match
+and no tag fallback means no inserted whitespace.
+
+The boundaries surround retained **nested** elements, including empty ones.
+They do not surround a selected fragment root, allocate blocks, or insert
+text between separate output records. Omitted/skipped subtrees contribute no
+boundaries. Selectors see original source locators, children, and preceding
+siblings even after explicit omissions. Contents and tail text are preserved;
+for example, the `space` rule above makes
+`left<span class="space">right</span>end` into `left rightend`, not
+`left right end` or `left end`.
+
+Whitespace is inserted before normalization, source-text matching, slicing,
+and prefix removal. It is real text, so it contributes to character offsets
+and survives removal of optional markup. Existing whitespace-collapse and
+trim settings still apply. An unmatched word wrapper such as
+`in<span>side</span>` remains `inside`.
+
+Boundary rules do not automatically create markup. To retain evidence of the
+source spacing as well, configure a separate span or milestone rule; see
+[spacing and markup](markup.md#spacing-and-markup). New rules are pinned in
+the compiled policy, including side placement and order. Without them, the
+existing policy representation, extracted fields, and compiled digests remain
+unchanged.
 
 The other optional member is `text.markup`, fully specified in
 [Marked-up text](markup.md). It supports XML fragments or configurable

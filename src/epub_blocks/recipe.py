@@ -1958,22 +1958,21 @@ def _attach_milestones(
     )
 
 
-def _compile_from_epub(
+def _recipe_candidates_from_epub(
     path: Path,
     spec: _RecipeSpec,
     epub: EpubArchive,
     package: EpubPackage,
     document_cache: dict[str, XmlElement],
     *,
-    verify_digest: bool,
-) -> CompiledRecipe:
+    detached: list[Fragment] | None = None,
+) -> list[TextBlock]:
     if spec.identifier not in package.identifiers:
         raise EpubBlocksError(
             f"{path}: expected package identifier {spec.identifier!r} not found"
         )
     source = spec.source_blocks
-    detached: list[Fragment] = []
-    candidates = _extract_blocks_from_epub(
+    return _extract_blocks_from_epub(
         epub,
         package,
         path,
@@ -1988,6 +1987,22 @@ def _compile_from_epub(
         document_cache=document_cache,
         content=spec.content,
         detached_milestones=detached,
+    )
+
+
+def _compile_from_epub(
+    path: Path,
+    spec: _RecipeSpec,
+    epub: EpubArchive,
+    package: EpubPackage,
+    document_cache: dict[str, XmlElement],
+    *,
+    verify_digest: bool,
+) -> CompiledRecipe:
+    source = spec.source_blocks
+    detached: list[Fragment] = []
+    candidates = _recipe_candidates_from_epub(
+        path, spec, epub, package, document_cache, detached=detached
     )
     for category, special_outputs in (
         ("replacement", spec.output.replacements),
@@ -2064,6 +2079,36 @@ def _compile_from_epub(
             f"expected {spec.output.compiled_sha256!r}, found {actual_digest!r}"
         )
     return compiled
+
+
+def extract_recipe_candidates(
+    epub_path: StrPath,
+    recipe: Mapping[str, object],
+    *,
+    recipe_location: str = "recipe",
+    limits: SafetyLimits = DEFAULT_SAFETY_LIMITS,
+) -> list[TextBlock]:
+    """Inspect normalized source blocks using a recipe's source/text policies.
+
+    Validates recipe syntax and EPUB identity, but does not apply output rules
+    or require/verify a compiled-plan digest. Text is plain, not serialized
+    markup. Detached milestones and final output coverage require compilation.
+    """
+    path, spec = _prepare_recipe(
+        epub_path, recipe, recipe_location, verify_digest=False
+    )
+    with path.open("rb") as source:
+        if _stream_sha256(source) != spec.sha256:
+            raise EpubBlocksError(f"{path}: source SHA-256 does not match recipe")
+        source.seek(0)
+        try:
+            zip_file = ZipFile(source)
+        except BadZipFile as error:
+            raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
+        with zip_file:
+            epub = EpubArchive(zip_file, limits)
+            package = read_epub_package(epub)
+            return _recipe_candidates_from_epub(path, spec, epub, package, {})
 
 
 def compile_recipe(

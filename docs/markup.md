@@ -1,6 +1,6 @@
 # Marked-up text
 
-This is the marked-up text contract for epub-blocks 0.4.0.
+This is the marked-up text contract for epub-blocks 0.5.0.
 It extends recipe version `"1"`; it does not introduce a separate recipe format.
 
 The output remains headerless `id`, `type`, `text` TSV. With `text.markup`
@@ -55,6 +55,47 @@ Delimiters: A ⧼quiet⧽ word.⟦iv⟧
 
 Delimiter tokens are recipe configuration, not a fixed list of styles hard-coded
 into the extractor. A consumer must know the recipe's name/kind/delimiter mapping.
+
+## Spacing and markup
+
+Selective `text.block_boundaries.rules` can insert real whitespace while
+`text.markup.rules` independently records the source spacing element. For
+example, a boundary rule matching `span.space` with `"before": " "`, combined
+with an empty-element milestone rule, can represent the invented source
+`left<span class="space"/>right` as:
+
+```text
+XML:        left <space/>right
+Delimiters: left ⟬⟭right
+Plain text: left right
+```
+
+The space before the marker is an actual U+0020 in both serializations. The
+marker records source structure; removing the marker must not remove that
+textual space. Both representations therefore share offsets that already
+include the inserted whitespace. This differs from older schemes where a
+visible spacing glyph must later be replaced by whitespace. Delimiter syntax
+is unchanged: even an unlabeled milestone has an opening/closing pair, not
+a new single-token escape convention.
+
+Use `"empty": true` on a milestone rule intended only for empty spacing
+elements. A milestone replaces its matched contents. If a spacing element
+can contain text that should survive, use a span rule instead (or an
+empty-only milestone followed by a differently named span rule). A
+before-only boundary rule with span markup might give
+`left <spaced>right</spaced>end`, whose plain text is `left rightend`.
+
+Inserted whitespace lies outside the matched element's marker/span, inside
+any enclosing markup. Whitespace normalization may merge it with neighbouring
+source whitespace, retaining the first contributing run as usual. Slices
+and prefix removal count this normalized text and use the existing rules for
+clipping spans and assigning a milestone at a slice boundary.
+
+Boundaries apply only inside a selected fragment. A detached milestone
+attached to the start/end of another fragment does not acquire artificial
+whitespace from a rule on its own root; record boundaries already separate
+paragraphs. There is no CSS interpreter or inferred spacing: recipe authors
+choose the structural selectors, sides, and markup deliberately.
 
 ## Markup rules
 
@@ -187,9 +228,9 @@ For each fragment:
    for all selector matching, including contextual predicates.
 2. Apply explicit fragment omissions and structural/semantic skips.
 3. Build text with selected spans and milestones. Insert configured nested
-   block boundaries for retained elements only; transparent inline wrappers
-   and omitted subtrees insert none. Empty retained blocks can still introduce
-   their configured boundaries.
+   boundaries for retained elements only, using ordered selective rules or
+   the tag fallback. Unmatched inline wrappers and omitted subtrees insert
+   none. Empty retained elements can still introduce configured boundaries.
 4. Collapse/trim whitespace across text runs, ignoring markers. The single
    surviving space stays with the run that contributed its first character.
 5. Normalize Unicode in text, not labels or marker tokens.
@@ -216,6 +257,11 @@ and `allow_empty` in the output rule. Such rows are an alternative to attaching
 a zero-width milestone, not a requirement to count separators as paragraphs.
 
 ## Compatibility and scope
+
+0.5.0 adds selective before/after boundary rules; with no new rules, 0.4.0
+recipes keep their fields and compiled digests. An explicit empty rules array
+has the same effective policy as omission. Existing markup kinds, delimiter
+grammar, and milestone attachment behavior are unchanged.
 
 Without the new options, extracted fields and compiled digests remain compatible
 with 0.3.0. TSV bytes deliberately change wherever the former writer used

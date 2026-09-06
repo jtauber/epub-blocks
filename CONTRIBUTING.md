@@ -29,6 +29,12 @@ uv run pyright --verifytypes epub_blocks --ignoreexternal
 
 New behavior and bug fixes should include tests. Tests create conforming EPUB
 fixtures in temporary directories; do not commit copyrighted EPUB files.
+Release-workflow tests parse the workflow with the development-only PyYAML
+dependency and exercise its publishing commands against a local fake GitHub
+CLI; they never contact GitHub or PyPI. They require Bash and `diff` (available
+on the CI runners). With Node.js on `PATH`, the whitespace tests also check
+the schema's regular expression in JavaScript; that cross-engine test is
+skipped locally when Node.js is absent but required in CI.
 
 Please open an issue before proposing an incompatible recipe-format or public
 API change. During the current pre-1.0 phase, with no known external recipe

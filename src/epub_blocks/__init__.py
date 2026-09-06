@@ -5,6 +5,7 @@ from importlib.metadata import version
 from .errors import EpubBlocksError
 from .extract import extract_blocks, extract_fragments
 from .models import (
+    BoundaryRule,
     CompiledBlock,
     CompiledRecipe,
     ContentOptions,
@@ -25,6 +26,7 @@ from .recipe import (
     compile_recipe_file,
     compiled_recipe_digest,
     extract_recipe,
+    extract_recipe_candidates,
     extract_recipe_file,
     load_recipe,
     write_tsv,
@@ -34,6 +36,7 @@ from .safety import SafetyLimits
 __version__ = version("epub-blocks")
 
 __all__ = [
+    "BoundaryRule",
     "CompiledBlock",
     "CompiledRecipe",
     "ContentOptions",
@@ -56,6 +59,7 @@ __all__ = [
     "extract_blocks",
     "extract_fragments",
     "extract_recipe",
+    "extract_recipe_candidates",
     "extract_recipe_file",
     "inspect_epub",
     "load_recipe",
