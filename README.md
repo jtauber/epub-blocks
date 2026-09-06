@@ -253,7 +253,7 @@ uv run twine check dist/*
 uv run pyright --verifytypes epub_blocks --ignoreexternal
 ```
 
-Coverage includes branches and enforces a 90% minimum. Tests build synthetic
+Coverage includes branches and enforces a 98% minimum. Tests build synthetic
 EPUBs; no EPUB files are committed. See
 [CONTRIBUTING.md](https://github.com/jtauber/epub-blocks/blob/main/CONTRIBUTING.md)
 and [CHANGELOG.md](https://github.com/jtauber/epub-blocks/blob/main/CHANGELOG.md).
