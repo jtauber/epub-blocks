@@ -1,7 +1,13 @@
 # Marked-up text
 
-This is the marked-up text contract for epub-blocks 0.5.0.
+This is the marked-up text contract for epub-blocks 0.6.0.
 It extends recipe version `"1"`; it does not introduce a separate recipe format.
+
+Version 0.6.0 additionally supports
+`attribute_prefixes` in shared selectors. For example, a page milestone rule
+can match `{"tag": "span", "empty": true, "attribute_prefixes": {"id": "page_"}}`
+and use `"label_attribute": "id"`. Only page-prefixed IDs match, and labels
+retain their complete source value. The serialization contract is unchanged.
 
 The output remains headerless `id`, `type`, `text` TSV. With `text.markup`
 enabled, the third column contains a marked-up intermediate. A separate
@@ -79,7 +85,7 @@ is unchanged: even an unlabeled milestone has an opening/closing pair, not
 a new single-token escape convention.
 
 Use `"empty": true` on a milestone rule intended only for empty spacing
-elements. A milestone replaces its matched contents. If a spacing element
+elements. By default a milestone replaces its matched contents. If a spacing element
 can contain text that should survive, use a span rule instead (or an
 empty-only milestone followed by a differently named span rule). A
 before-only boundary rule with span markup might give
@@ -99,7 +105,7 @@ choose the structural selectors, sides, and markup deliberately.
 
 ## Markup rules
 
-Rules are ordered, first-match-wins, and use the structural selectors described
+Rules are ordered and first-match-wins by default, using the structural selectors described
 in the [recipe specification](recipe-format.md#structural-element-selectors).
 They apply to selected roots as well as descendants. An unhandled inline
 element is transparent: its text and children remain, without invented spaces.
@@ -113,18 +119,23 @@ Each rule requires:
 
 `span` wraps the retained contents, with normal nesting. `milestone` represents
 the selected source element as a zero-width event, replacing that element's
-text/subtree rather than transcribing it. A milestone may have
+text/subtree rather than transcribing it by default (`position: "replace"`).
+The `position: "before"` alternative retains those contents, as
+described below. A milestone may have
 `label_attribute`, the exact source attribute name from which to obtain a
 nonempty label. Namespaced attributes use expanded XML names, such as
 `{http://www.idpf.org/2007/ops}type`. Labels are opaque strings, not integers,
-and are escaped without whitespace or Unicode normalization.
+and are escaped without whitespace or Unicode normalization. The
+`label_text` alternative below deliberately has its own whitespace policy.
 
 A name cannot be used for both kinds. `label_attribute` is not allowed for
 spans. A missing/empty required label is an error. Matching a milestone around
 another retained milestone is an error rather than silently losing the nested
-event. If one element has several relevant styles, give its combined condition
+event (unless it is a content-preserving leading milestone). If one element has several relevant styles, give its combined condition
 a rule/name before the more general rules; first-match-wins does not apply
 multiple span wrappers to the same source element.
+An opt-in leading rule can also continue to another effect on the same element;
+see [composed markup](#composing-effects-on-one-element-060).
 
 Do not also list a retained semantic type in `omit_epub_types`. For example,
 page-retaining recipes must remove `"pagebreak"` from their omission list.
@@ -132,6 +143,241 @@ Conflicting retention/omission is rejected. Explicit structural skips and
 source filters still define what is intentionally outside the extraction.
 Descendants of a semantically omitted subtree do not participate in the
 nested-milestone check, because they are not retained events.
+
+### Text-derived labels (0.6.0)
+
+Some sources store printed page or verse numbers in an element's contents
+instead of an attribute. To retain that content as a zero-width label:
+
+```json
+{
+  "match": {"tag": "p", "classes_any": ["printed-number"]},
+  "kind": "milestone",
+  "name": "printed-line-number",
+  "label_text": true
+}
+```
+
+For `<p class="printed-number"> 005 </p>`, this emits
+`<printed-line-number label="005"/>`. When detached, it follows the same
+explicit attachment policies as an attribute-derived milestone; it does not
+consume a block or line number or contribute `005` to the reading. A number
+inside a selected verse wrapper stays on that line. This does not infer a
+citation reference from the printed number; output rules still generate IDs.
+
+Contract:
+
+- `label_text` is a boolean, default `false`, and is only valid on milestones
+  (even an explicit `false` is invalid on a span rule).
+- `true` and `label_attribute` are mutually exclusive. `false` with an
+  attribute label is allowed and has the same meaning as omitting the option.
+- The label uses retained text from the matched element and its descendants,
+  excluding its outer tail. Source skips, semantic omissions, fragment
+  omissions, original selector context, and nested whitespace boundaries
+  apply. Nested span markup is flattened, not serialized into the label.
+- Leading/trailing whitespace is removed and every run of Python whitespace
+  becomes one ordinary space, independently of the recipe's prose
+  normalization settings. Leading zeroes, case, punctuation, and Unicode
+  code points are otherwise unchanged. Labels are not parsed as numbers or
+  Unicode-normalized. Existing attribute-derived labels remain opaque and
+  are **not** subjected to this whitespace policy.
+- An empty retained label is an error. With the default `position: "replace"`, a retained nested milestone still
+  raises an overlap error; it is not silently folded into or lost from the
+  label. Use a span or separate source structure when both events must survive.
+- XML and Unicode serializers escape the same resulting label using their
+  existing rules. Prose offsets and slices count neither labels nor markup.
+- A leading-only text-label bundle on a wrapper requires that the wrapper be
+  inside an explicitly selected source block or fragment. Selecting only its
+  descendants is rejected: the extractor cannot infer the wrapper's retained
+  label text from separately omitted, skipped, or sliced descendant fragments.
+  Select the wrapper itself with a `source_blocks.element_rules` rule using
+  `"action": "block"`, then apply any fragment omissions to that wrapper. This
+  requirement does not affect detached **replacing** text labels, attribute
+  labels, or original ordered-list counters. An entirely unused wrapper is
+  ignored.
+
+The public `MarkupRule` model has the corresponding `label_text: bool = False`
+field. The schema, runtime parser, and compiled-policy hash use the same
+contract. Only `true` is stored in the canonical policy, so recipes that omit
+this option or set it to `false` retain their previous compiled digests.
+
+### Leading labels and ordered lists (0.6.0)
+
+`position: "before"` emits a milestone immediately before the matched
+element's retained contents, instead of replacing them. Text, spans, and
+nested milestones survive. The event remains zero-width: it does not add
+words to the reading, consume a citation number, or change text offsets.
+This option also works with existing attribute/text labels or no label.
+
+For HTML-generated list numbers:
+
+```json
+{
+  "match": {"tag": "li"},
+  "kind": "milestone",
+  "name": "list-number",
+  "position": "before",
+  "label_counter": "ordered-list"
+}
+```
+
+With `"list-number": ["⟬", "⟭"]` in the delimiter table, the invented
+source `<ol><li value="5"><p>First</p></li><li><p>Next</p></li></ol>` yields:
+
+```text
+XML:        <list-number label="5"/>First
+            <list-number label="6"/>Next
+Delimiters: ⟬5⟭First
+            ⟬6⟭Next
+```
+
+Counter contract:
+
+- A match must be an original `li` directly inside an `ol`. Use locators or
+  other selectors to distinguish ordered from unordered items in mixed books.
+- Numbers follow original direct-child list order: default 1, overridden by
+  `ol start`; `li value` resets that item's number and following progression.
+  A present `reversed` attribute decrements; its default start is the original
+  direct-item count. Nested lists have independent state. These are the
+  [HTML ordinal rules](https://html.spec.whatwg.org/multipage/grouping-content.html#ordinal-value).
+- Filtering, skipping, slicing, or omitting an earlier item never renumbers
+  later ones. Resets on omitted items still count. Source context is retained
+  even when extracting a copied fragment or a single nested paragraph.
+- Only decimal numbering is supported: absent `type` or `type="1"` on the
+  list and its direct items. Other explicit types are errors. CSS counters,
+  `list-style-type`, and visual punctuation are not interpreted; authors must
+  check the source styling before choosing this rule. The emitted label is
+  the ordinal, not a claim to reproduce the rendered marker glyphs.
+- Start/value attributes must be whole ASCII integers, with optional sign
+  and surrounding HTML ASCII whitespace. Zero and negatives are supported.
+  Output is canonical decimal (`+005` becomes `5`). Malformed/overlarge values
+  fail rather than applying browser error recovery. All direct items in a
+  used list are validated, including omitted siblings.
+
+Selection and attachment contract (also applies to other leading labels):
+
+- Selecting the whole list/item includes each leading event once in its
+  normal subtree position. Boundaries still control spacing between items.
+- A leading rule does not itself turn a wrapper into a text block. With
+  nested-paragraph selection an attribute or counter event attaches once,
+  before the first retained descendant fragment; later paragraphs get no
+  duplicate label. Leading text-derived labels instead require explicit
+  wrapper selection, as described above.
+  Nested prefixes retain outer-before-inner source order at a shared offset.
+- A wrapper whose entire subtree is excluded contributes no leading event
+  to the next unrelated item. Structural skips remove the wrapper/subtree;
+  ordinary candidate filters still apply to the selected candidate elements.
+  A retained detached child marker also counts as retained subtree content:
+  its textless wrappers' leading bundles accompany it under the same
+  `between_blocks`/`trailing` policy, in outer-before-inner order. For example,
+  a page-labelled wrapper containing only a retained image keeps both markers
+  on the following caption. A genuinely empty or entirely omitted wrapper
+  still contributes nothing. Source-ordered fragment requirements still apply.
+  Detached leading bundles are validated only when retained: invalid labels
+  or duplicate effects in unused wrappers do not abort extraction. Candidate
+  filters likewise run before markup validation. Once a list counter is used,
+  its original list's numbering must still be valid, including omitted items.
+  Unused leading bundles are also discarded before checking output order;
+  they cannot forbid reordering when no retained detached event needs attachment.
+- An explicitly selected fragment owns its markers: omitted or sliced-away
+  events are not restored as attachments. Slices use the usual zero-width
+  boundary rules. A replacing ancestor cannot silently discard a retained
+  leading descendant; the existing overlap error still applies.
+
+`position` is milestone-only, with values `"replace"` (default) and `"before"`.
+`label_counter` is milestone-only and currently accepts only `"ordered-list"`;
+it requires `position: "before"` and is mutually exclusive with
+`label_attribute` or true `label_text`. A false `label_text` is allowed.
+The public `MarkupRule` adds `position: str = "replace"` and
+`label_counter: str | None = None`. Runtime, typed-state validation, JSON
+Schema, and compiled hashes share this contract. Default position and absent
+counter fields do not change existing recipe digests. Recipe version stays `"1"`.
+
+### Composing effects on one element (0.6.0)
+
+A source element can carry more than one kind of information: for example,
+an inline image may also have a page ID, or an italic paragraph may start a
+page. Add `continue_matching: true` to a **leading milestone** rule to emit
+its event and continue searching later rules for that same element:
+
+```json
+"rules": [
+  {
+    "match": {"attribute_prefixes": {"id": "page_"}},
+    "kind": "milestone",
+    "name": "page",
+    "label_attribute": "id",
+    "position": "before",
+    "continue_matching": true
+  },
+  {
+    "match": {"tag": "img"},
+    "kind": "milestone",
+    "name": "image",
+    "label_attribute": "src"
+  },
+  {
+    "match": {"classes_all": ["italic"]},
+    "kind": "span",
+    "name": "em"
+  }
+]
+```
+
+The source `<img id="page_5" src="letter.jpg"/>` now emits
+`<page label="page_5"/><image label="letter.jpg"/>`. The source
+`<p id="page_6" class="italic">A word.</p>` emits
+`<page label="page_6"/><em>A word.</em>`. In delimiter mode, with pairs
+`page: ["⟦", "⟧"]`, `image: ["⟮", "⟯"]`, and `em: ["⧼", "⧽"]`, the same
+outputs are `⟦page_5⟧⟮letter.jpg⟯` and `⟦page_6⟧⧼A word.⧽`.
+
+The contract is deliberately explicit:
+
+- `continue_matching` is a strict boolean, default `false`. Omission or
+  explicit `false` preserves existing behavior and compiled digests. A true
+  value is part of the compiled content policy even if no later rule matches.
+- `true` requires `kind: "milestone"` and `position: "before"`. A span or
+  replacing milestone cannot continue; it would introduce ambiguous wrapping
+  or replacement behavior. Use an existing combined style name for multiple
+  styles on one element, rather than stacking span rules.
+- After a continuing match, nonmatching rules are skipped. The next matching
+  rule is applied and ends the search unless it also explicitly continues.
+  Thus several leading effects can precede at most one ordinary effect. If
+  no further rule matches, the leading markers precede the retained contents.
+- Prefix milestones are emitted in matching-rule order, before any span on
+  that element. Child markup retains source order and nesting. An image's
+  replacing effect still omits the image subtree, not its sibling tail.
+- Each composed effect must have a distinct name on the matched element;
+  repeating a name is a runtime error. Reusing a name in non-overlapping
+  selectors or on different source elements remains allowed. Every applied
+  label must be valid; later label errors are not hidden by an earlier match.
+- Attribute labels remain opaque. Text-derived labels read the element's
+  retained source contents, not labels emitted by other effects. Ordered-list
+  labels retain the original source counter rules. A leading-only bundle with
+  any text-derived label requires explicit wrapper selection; descendant-only
+  selection cannot supply its retained-content projection.
+- Effects on one element form one bundle for detached placement and duplicate
+  source-use checks. A detached page-plus-image bundle follows normal
+  `between_blocks`/`trailing` policies; a leading-only bundle belongs to its
+  retained subtree. When that subtree consists of detached child markers,
+  the leading bundle accompanies those markers under their attachment policy.
+  It is attached once, not once per effect. This does not make unselected
+  ancestor spans inherited.
+- Slicing keeps coincident zero-width markers together under the existing
+  shared-boundary rules. Omitting their element removes the bundle. Reusing
+  the element's markers through another fragment still raises an error.
+- Source skips, semantic-omission conflicts, and protection against replacing
+  a nested milestone remain in force. A leading effect and a replacing effect
+  on the **same** element do not constitute nested source milestones.
+
+The example's leading page rule suits content-bearing paragraphs and inline
+images. For separate empty page anchors that should attach to a following
+block, put a more specific **replacing** page rule first; a leading marker on
+an empty, unselected wrapper has no retained descendant to attach to.
+
+The public `MarkupRule` gains `continue_matching: bool = False`. JSON Schema,
+recipe parsing, compiled-model validation, candidate inspection, extraction,
+and both serializers use the same policy. Recipe format remains `"1"`.
 
 ## XML fragment grammar and escaping
 
@@ -180,6 +426,9 @@ serialization represents them with character references. The extraction API
 can still return strings that are not representable as plain TSV fields.
 
 ## Milestones between blocks
+
+This section describes the default **replacing** milestones. Leading events
+use the subtree-bound attachment rules above.
 
 Page-only paragraphs, empty scene separators, and milestone elements in
 otherwise unselected wrappers are discovered in the selected documents, not
@@ -257,6 +506,12 @@ and `allow_empty` in the output rule. Such rows are an alternative to attaching
 a zero-width milestone, not a requirement to count separators as paragraphs.
 
 ## Compatibility and scope
+
+0.6.0 adds prefix selectors, text-derived and leading labels, ordered-list
+counters, and composed effects. These options are opt-in; valid 0.5.0 recipes
+without them retain their fields and compiled digests. Default or false new
+options are hash-neutral. Ambiguous text-label projections and conflicting
+markup are rejected rather than silently changing the selected content.
 
 0.5.0 adds selective before/after boundary rules; with no new rules, 0.4.0
 recipes keep their fields and compiled digests. An explicit empty rules array

@@ -20,6 +20,7 @@ class ElementSelector:
     empty: bool | None = None
     previous_sibling: ElementSelector | None = None
     has_child: ElementSelector | None = None
+    attribute_prefixes: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,10 @@ class MarkupRule:
     kind: str
     name: str
     label_attribute: str | None = None
+    label_text: bool = False
+    position: str = "replace"
+    label_counter: str | None = None
+    continue_matching: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,7 +140,8 @@ class CompiledBlock:
 class CompiledRecipe:
     """The deterministic extraction plan produced from a version 1 recipe."""
 
-    epub_identifier: str
+    # None denotes a hash-only pin for a package with no nonempty identifiers.
+    epub_identifier: str | None
     epub_sha256: str
     normalization: NormalizationOptions
     omit_epub_types: frozenset[str]

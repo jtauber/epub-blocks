@@ -1,7 +1,7 @@
 # Recipe format
 
 This document specifies `epub-blocks` recipe version 1 as implemented by
-epub-blocks 0.5.0. A recipe is a self-contained structural program that turns
+epub-blocks 0.6.0. A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
 The recipe generates its output identifiers and types. It does not refer to a
@@ -35,9 +35,34 @@ values are invalid outside opaque `metadata`.
 }
 ```
 
-Both values are required. `identifier` must equal one of the nonempty
-`dc:identifier` values in the package metadata. `sha256` is the lowercase
-SHA-256 of the complete EPUB file.
+`sha256` is always required: the lowercase SHA-256 of the complete EPUB file.
+When supplied, `identifier` must equal one of the nonempty `dc:identifier`
+values in the package metadata (whose surrounding whitespace is stripped).
+An incorrect identifier is an error even if the archive hash matches.
+
+Since 0.6.0, omit `identifier` **only when the package has no nonempty
+identifiers**. Missing, empty, and whitespace-only package values count as
+absent. This also covers a dangling `unique-identifier` reference or one
+pointing to an empty element, provided no other usable identifier exists:
+
+```json
+"epub": {
+  "sha256": "f4f9c2d902a41b80732b2dce7ad01a57f615859c21417a5019e3cd8e4d271282"
+}
+```
+
+The recipe does not invent an identifier or modify the EPUB. Omission is not
+permission to ignore an existing identifier; if any nonempty package value
+exists, the recipe must supply one that matches. Explicit `null` and empty
+strings remain invalid recipe values, and whitespace-only strings do not
+match absent identifiers. The schema checks the optional field's syntax;
+runtime validation additionally checks this condition against the actual EPUB.
+
+These checks apply to candidate inspection, compilation (including
+`verify_digest=False`), extraction, and the CLI. Source hashing and archive
+safety remain mandatory; normal compilation/extraction also verifies the
+compiled-plan hash. `CompiledRecipe.epub_identifier` is `None` for hash-only
+pins and a string otherwise. Existing recipes and compiled digests are unchanged.
 
 ## Normalization
 
@@ -117,6 +142,7 @@ criteria must pass:
 | `locators` | Any case-insensitive EPUB-local locator glob |
 | `epub_types` | All exact tokens must occur in `epub:type` |
 | `attributes` | Map of exact XML attribute names to exact string values |
+| `attribute_prefixes` | Map of exact XML attribute names to nonempty, case-sensitive literal value prefixes (0.6.0) |
 | `empty` | Whether the subtree's raw text is entirely whitespace |
 | `previous_sibling` | A selector for the immediately preceding element sibling |
 | `has_child` | A selector matching at least one immediate child element |
@@ -129,6 +155,30 @@ must contain at least one effective criterion.
 Empty arrays other than `classes`, and an empty attribute map, impose no
 restriction. Structural selectors do not accept regular-expression text
 matching. Output-rule `match` retains its separate `text_pattern` vocabulary.
+
+#### Attribute prefixes (0.6.0)
+
+`"attribute_prefixes": {"id": "page_"}` matches elements whose `id` exists
+and starts with the literal string `page_`. Missing/empty values, `Page_1`,
+and `other_page_1` do not match. This is not a glob or regular expression;
+characters such as `*`, `?`, and `.` match themselves. No trimming, case
+folding, or Unicode normalization is applied to names or attribute values.
+Namespaced attributes use their expanded XML names, e.g. `{urn:example}id`.
+
+Every map entry and every other selector criterion must match. Combining
+`attributes` and `attribute_prefixes`, including on the same attribute,
+requires both constraints; exact attribute matching is unchanged. Prefixes
+must be nonempty strings and names must be nonempty. An empty prefix map is
+allowed alongside another effective criterion but does not itself make a
+valid selector.
+
+The field is available in all shared structural selectors: source-element
+rules, markup, selective whitespace, and the permitted `previous_sibling`
+and `has_child` predicates. It is not an output-rule `match` field. Milestone
+labels stay opaque: selecting `page_8` by prefix does not change the label to
+`8`. Recipes without prefixes, including an explicitly empty prefix map,
+retain their existing compiled digests; effective prefix rules are hashed
+canonically, independent of JSON map order. Recipe format remains `"1"`.
 
 ### Ordered source-element rules
 
@@ -247,6 +297,17 @@ The other optional member is `text.markup`, fully specified in
 delimiters, spans, attribute-labeled milestones, escaping, and explicit
 between-block attachment policies. Both serializers preserve the same
 references and underlying normalized text.
+Version 0.6.0 also supports
+[`label_text: true`](markup.md#text-derived-labels-060) for milestone
+labels stored in element contents instead of attributes, and
+[leading labels with ordered-list counters](markup.md#leading-labels-and-ordered-lists-060)
+using `position: "before"` and `label_counter: "ordered-list"`. Label-source fields
+belong to markup rules, not source or output rules; recipe format remains `"1"`.
+Leading milestone rules can opt into
+[composed effects](markup.md#composing-effects-on-one-element-060)
+with `continue_matching: true`, allowing a page marker and image marker (or a
+page marker and a span) on one element. Ordinary rules still stop at the first
+match; absent/false options preserve existing compiled hashes.
 
 ## Output
 

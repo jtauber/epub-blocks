@@ -9,6 +9,14 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
+Version **0.6.0** adds literal
+[`attribute_prefixes` matching](docs/recipe-format.md#attribute-prefixes-060)
+in shared structural selectors,
+[text-derived milestone labels](docs/markup.md#text-derived-labels-060),
+[content-preserving leading labels and ordered-list counters](docs/markup.md#leading-labels-and-ordered-lists-060),
+[explicit composition of leading and ordinary markup effects](docs/markup.md#composing-effects-on-one-element-060),
+and [hash-only source pins for identifier-less EPUBs](docs/recipe-format.md#epub-pin).
+
 ## Installation
 
 ```bash
@@ -67,10 +75,10 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.5.0.
-Existing 0.4.0 recipes keep their extracted fields and compiled digest when
-new boundary rules are absent. TSV serialization uses literal fields, as in
-0.4.0, instead of CSV-style quoting:
+Recipe version 1 remains the serialized format in epub-blocks 0.6.0.
+Existing valid 0.5.0 recipes keep their extracted fields and compiled digest
+when the new options are absent. TSV serialization uses literal fields,
+instead of CSV-style quoting:
 
 ```json
 {
@@ -219,10 +227,15 @@ for record in records:
 For recipe authoring, `extract_recipe_candidates(epub_path, recipe)` returns
 source blocks with locators, tags, classes, and plain normalized text, using
 the recipe's source-element and text policies. It checks the EPUB hash and
-identifier but does not apply output rules or require/verify the compiled-plan
-digest. A syntactically valid draft output section is still required; use
+identifier policy but does not apply output rules or require/verify the
+compiled-plan digest. A syntactically valid draft output section is still required; use
 `load_recipe` to read JSON. Final output references, coverage, and detached
 milestone placement are checked by compilation, not candidate inspection.
+Since 0.6.0, a recipe may omit `epub.identifier` only for an EPUB with no
+nonempty package identifiers; the archive SHA-256 is still mandatory. A
+supplied mismatched identifier never falls back to hash-only checking.
+The compiled plan's `epub_identifier` is `None` in this case. See the
+[source-pin contract](docs/recipe-format.md#epub-pin).
 `Fragment` and `extract_fragments` provide lower-level access to selected XHTML
 subtrees. The supported import surface is the names exported by `epub_blocks`.
 
@@ -253,7 +266,7 @@ uv run twine check dist/*
 uv run pyright --verifytypes epub_blocks --ignoreexternal
 ```
 
-Coverage includes branches and enforces a 98% minimum. Tests build synthetic
+Coverage includes branches and enforces a 99% minimum. Tests build synthetic
 EPUBs; no EPUB files are committed. See
 [CONTRIBUTING.md](https://github.com/jtauber/epub-blocks/blob/main/CONTRIBUTING.md)
 and [CHANGELOG.md](https://github.com/jtauber/epub-blocks/blob/main/CHANGELOG.md).

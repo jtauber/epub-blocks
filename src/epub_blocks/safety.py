@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from zipfile import BadZipFile, ZipFile, ZipInfo
+from zlib import error as ZlibError
 
 from .errors import EpubBlocksError
 
@@ -117,7 +118,7 @@ class EpubArchive:
         member = self._member(name)
         try:
             data = self._archive.read(member)
-        except (BadZipFile, NotImplementedError, RuntimeError) as error:
+        except (BadZipFile, NotImplementedError, RuntimeError, ZlibError) as error:
             raise EpubBlocksError(
                 f"EPUB archive member {name!r} could not be read"
             ) from error

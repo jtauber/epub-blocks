@@ -81,6 +81,7 @@ def selector(
         "locators",
         "epub_types",
         "attributes",
+        "attribute_prefixes",
         "empty",
     }
     if contextual:
@@ -93,6 +94,18 @@ def selector(
         if not isinstance(item, str):
             raise EpubBlocksError(f"{location}.attributes: values must be strings")
         attributes.append((key, item))
+    prefixes = object_value(
+        spec.get("attribute_prefixes", {}), location + ".attribute_prefixes"
+    )
+    attribute_prefixes = tuple(
+        sorted(
+            (
+                string(key, location + ".attribute_prefixes"),
+                string(item, location + ".attribute_prefixes"),
+            )
+            for key, item in prefixes.items()
+        )
+    )
     result = ElementSelector(
         string(spec["tag"], location + ".tag") if "tag" in spec else None,
         strings(spec["classes"], location + ".classes") if "classes" in spec else None,
@@ -110,6 +123,7 @@ def selector(
         selector(spec["has_child"], location + ".has_child", contextual=False)
         if "has_child" in spec
         else None,
+        attribute_prefixes=attribute_prefixes,
     )
     if result == ElementSelector():
         raise EpubBlocksError(f"{location}: must contain at least one criterion")
@@ -151,7 +165,20 @@ def markup_options(value: object, location: str) -> MarkupOptions:
     for i, item in enumerate(array(spec.get("rules", []), location + ".rules"), 1):
         at = f"{location}.rules[{i}]"
         rule = object_value(item, at)
-        members(rule, {"match", "kind", "name", "label_attribute"}, at)
+        members(
+            rule,
+            {
+                "match",
+                "kind",
+                "name",
+                "label_attribute",
+                "label_text",
+                "position",
+                "label_counter",
+                "continue_matching",
+            },
+            at,
+        )
         kind = string(rule.get("kind"), at + ".kind")
         name = string(rule.get("name"), at + ".name")
         if kind not in {"span", "milestone"} or _NAME.fullmatch(name) is None:
@@ -166,8 +193,48 @@ def markup_options(value: object, location: str) -> MarkupOptions:
         )
         if kind == "span" and label is not None:
             raise EpubBlocksError(f"{at}: label_attribute is only valid for milestones")
+        label_text = boolean(rule.get("label_text", False), at + ".label_text")
+        if kind == "span" and "label_text" in rule:
+            raise EpubBlocksError(f"{at}: label_text is only valid for milestones")
+        if label_text and label is not None:
+            raise EpubBlocksError(f"{at}: label_text and label_attribute are exclusive")
+        position = string(rule.get("position", "replace"), at + ".position")
+        if position not in {"replace", "before"}:
+            raise EpubBlocksError(f"{at}: position must be replace or before")
+        counter = (
+            string(rule["label_counter"], at + ".label_counter")
+            if "label_counter" in rule
+            else None
+        )
+        if kind == "span" and ("position" in rule or counter is not None):
+            raise EpubBlocksError(
+                f"{at}: position and label_counter are only valid for milestones"
+            )
+        if counter is not None:
+            if counter != "ordered-list" or position != "before":
+                raise EpubBlocksError(
+                    f"{at}: label_counter requires ordered-list and position: before"
+                )
+            if label is not None or label_text:
+                raise EpubBlocksError(f"{at}: milestone label sources are exclusive")
+        continuing = boolean(
+            rule.get("continue_matching", False), at + ".continue_matching"
+        )
+        if continuing and (kind != "milestone" or position != "before"):
+            raise EpubBlocksError(
+                f"{at}: continue_matching requires a milestone with position: before"
+            )
         rules.append(
-            MarkupRule(selector(rule.get("match"), at + ".match"), kind, name, label)
+            MarkupRule(
+                selector(rule.get("match"), at + ".match"),
+                kind,
+                name,
+                label,
+                label_text,
+                position,
+                counter,
+                continuing,
+            )
         )
     delimiters = object_value(spec.get("delimiters", {}), location + ".delimiters")
     pairs: list[tuple[str, tuple[str, str]]] = []
@@ -258,6 +325,8 @@ def selector_value(spec: ElementSelector) -> dict[str, object]:
             result[key] = list(values)
     if spec.attributes:
         result["attributes"] = dict(spec.attributes)
+    if spec.attribute_prefixes:
+        result["attribute_prefixes"] = dict(spec.attribute_prefixes)
     if spec.empty is not None:
         result["empty"] = spec.empty
     if spec.previous_sibling is not None:
@@ -311,6 +380,18 @@ def content_value(content: ContentOptions) -> dict[str, object]:
                         if rule.label_attribute is not None
                         else {}
                     ),
+                    **({"label_text": True} if rule.label_text else {}),
+                    **(
+                        {"position": rule.position}
+                        if rule.position != "replace"
+                        else {}
+                    ),
+                    **(
+                        {"label_counter": rule.label_counter}
+                        if rule.label_counter is not None
+                        else {}
+                    ),
+                    **({"continue_matching": True} if rule.continue_matching else {}),
                 }
                 for rule in markup.rules
             ],
@@ -331,6 +412,16 @@ def validate_content(value: object) -> ContentOptions:
             boolean(
                 rule.keep_empty, f"compiled content.element_rules[{index}].keep_empty"
             )
+        if value.markup is not None:
+            for index, mark in enumerate(value.markup.rules, 1):
+                boolean(
+                    mark.label_text,
+                    f"compiled content.markup.rules[{index}].label_text",
+                )
+                boolean(
+                    mark.continue_matching,
+                    f"compiled content.markup.rules[{index}].continue_matching",
+                )
         serialized = content_value(value)
         rules = element_rules(
             serialized.pop("element_rules", []), "compiled content.element_rules"
@@ -380,6 +471,11 @@ def matches_element(
         return False
     if any(element.get(key) != value for key, value in spec.attributes):
         return False
+    if any(
+        not element.get(key, "").startswith(prefix)
+        for key, prefix in spec.attribute_prefixes
+    ):
+        return False
     if (
         spec.empty is not None
         and (not "".join(element.itertext()).strip()) != spec.empty
@@ -419,22 +515,31 @@ def source_rule(
     )
 
 
-def markup_rule(
+def markup_rules(
     element: XmlElement,
     content: ContentOptions,
     locator: str,
     previous: XmlElement | None = None,
-) -> MarkupRule | None:
+    *,
+    validate: bool = True,
+) -> tuple[MarkupRule, ...]:
+    """First match wins unless a leading milestone explicitly continues."""
     if content.markup is None:
-        return None
-    return next(
-        (
-            rule
-            for rule in content.markup.rules
-            if matches_element(element, rule.match, locator, previous)
-        ),
-        None,
-    )
+        return ()
+    result: list[MarkupRule] = []
+    names: set[str] = set()
+    for rule in content.markup.rules:
+        if not matches_element(element, rule.match, locator, previous):
+            continue
+        if validate and rule.name in names:
+            raise EpubBlocksError(
+                f"{locator}: composed markup repeats name {rule.name!r}"
+            )
+        names.add(rule.name)
+        result.append(rule)
+        if not rule.continue_matching:
+            break
+    return tuple(result)
 
 
 def boundary_spacing(
@@ -480,6 +585,66 @@ def milestones(tree: RichText) -> tuple[str, ...]:
     )
 
 
+class SourceContext:
+    """Original document structure, independent of selection and omissions."""
+
+    def __init__(self, body: XmlElement) -> None:
+        self.parents: dict[XmlElement, XmlElement] = {
+            child: parent for parent in body.iter() for child in parent
+        }
+        self.ordinals: dict[XmlElement, dict[XmlElement, str]] = {}
+
+    def ordered_list_label(self, item: XmlElement, locator: str) -> str:
+        parent = self.parents.get(item)
+        if (
+            local_name(item.tag) != "li"
+            or parent is None
+            or local_name(parent.tag) != "ol"
+        ):
+            raise EpubBlocksError(
+                f"{locator}: ordered-list label requires a direct li child of ol"
+            )
+        if parent not in self.ordinals:
+            items = [child for child in parent if local_name(child.tag) == "li"]
+            if parent.get("type", "1") != "1" or any(
+                child.get("type", "1") != "1" for child in items
+            ):
+                raise EpubBlocksError(
+                    f"{locator}: ordered-list labels support decimal type 1 only"
+                )
+
+            def integer(element: XmlElement, attribute: str, default: int) -> int:
+                value = element.get(attribute)
+                if value is None:
+                    return default
+                value = value.strip(" \t\r\n\f")
+                if re.fullmatch(r"[+-]?[0-9]+", value) is None:
+                    raise EpubBlocksError(
+                        f"{locator}: invalid ordered-list {attribute}: {value!r}"
+                    )
+                try:
+                    return int(value)
+                except ValueError as error:
+                    raise EpubBlocksError(
+                        f"{locator}: ordered-list {attribute} is too large"
+                    ) from error
+
+            reversed_list = "reversed" in parent.attrib
+            current = integer(parent, "start", len(items) if reversed_list else 1)
+            numbers: dict[XmlElement, str] = {}
+            for child in items:
+                current = integer(child, "value", current)
+                try:
+                    numbers[child] = str(current)
+                except ValueError as error:
+                    raise EpubBlocksError(
+                        f"{locator}: ordered-list ordinal is too large"
+                    ) from error
+                current += -1 if reversed_list else 1
+            self.ordinals[parent] = numbers
+        return self.ordinals[parent][item]
+
+
 def build_rich_text(
     element: XmlElement,
     locator: str,
@@ -487,6 +652,9 @@ def build_rich_text(
     omitted_types: frozenset[str],
     previous: XmlElement | None = None,
     origins: Mapping[int, tuple[str, XmlElement, XmlElement | None]] | None = None,
+    source: SourceContext | None = None,
+    *,
+    milestone_only: bool = False,
 ) -> RichText:
     def source_context(
         current: XmlElement, at: str, prev: XmlElement | None
@@ -502,15 +670,18 @@ def build_rich_text(
         selected = source_rule(original, content, at, prev)
         if selected is not None and selected.action == "skip":
             return None
-        rule = markup_rule(original, content, at, prev)
+        rules = markup_rules(original, content, at, prev)
         if set(current.get(EPUB_TYPE, "").split()) & omitted_types:
-            if rule is not None:
+            if rules:
                 raise EpubBlocksError(
                     f"{at}: retained markup is also semantically omitted"
                 )
             if not root:
                 return None
-        if rule is not None and rule.kind == "milestone":
+        prefix: list[str | RichText] = []
+        for rule in rules:
+            if rule.kind != "milestone":
+                continue
 
             def nested_milestone(parent: XmlElement, parent_locator: str) -> bool:
                 previous_child: XmlElement | None = None
@@ -521,25 +692,25 @@ def build_rich_text(
                     source = source_rule(
                         original_child, content, child_at, original_previous
                     )
-                    mark = markup_rule(
-                        original_child, content, child_at, original_previous
-                    )
                     if source is None or source.action != "skip":
+                        marks = markup_rules(
+                            original_child, content, child_at, original_previous
+                        )
                         if set(child.get(EPUB_TYPE, "").split()) & omitted_types:
-                            if mark is not None:
+                            if marks:
                                 raise EpubBlocksError(
                                     f"{child_at}: retained markup is also semantically omitted"
                                 )
                             previous_child = child
                             continue
-                        if mark is not None and mark.kind == "milestone":
+                        if any(mark.kind == "milestone" for mark in marks):
                             return True
                         if nested_milestone(child, child_at):
                             return True
                     previous_child = child
                 return False
 
-            if nested_milestone(current, at):
+            if rule.position == "replace" and nested_milestone(current, at):
                 raise EpubBlocksError(
                     f"{at}: overlapping milestone rules would discard a nested milestone"
                 )
@@ -548,7 +719,36 @@ def build_rich_text(
                 raise EpubBlocksError(
                     f"{at}: milestone label attribute {rule.label_attribute!r} is missing or empty"
                 )
-            return [RichText("milestone", rule.name, label, locator=at)]
+            if rule.label_text:
+                # Source skips, omissions, original context, and nested boundaries
+                # apply to label content, but markup does not become label syntax.
+                source_text = plain_text(
+                    build_rich_text(
+                        current,
+                        at,
+                        replace(content, markup=None),
+                        omitted_types,
+                        prev,
+                        origins,
+                        source,
+                    )
+                )
+                label = " ".join(source_text.split())
+                if not label:
+                    raise EpubBlocksError(f"{at}: milestone label text is empty")
+            if rule.label_counter is not None:
+                if source is None:
+                    raise EpubBlocksError(
+                        f"{at}: ordered-list label requires original document context"
+                    )
+                label = source.ordered_list_label(original, at)
+            prefix.append(RichText("milestone", rule.name, label, locator=at))
+            if rule.position == "replace":
+                return prefix
+        if root and milestone_only:
+            if not prefix:
+                raise EpubBlocksError(f"{at}: attached fragment must be a milestone")
+            return prefix
         pieces: list[str | RichText] = []
         if local_name(current.tag) == "br":
             pieces.append("\n")
@@ -579,9 +779,11 @@ def build_rich_text(
                 merged[-1] += item
             else:
                 merged.append(item)
-        if rule is not None:
-            return [RichText("span", rule.name, children=tuple(merged), locator=at)]
-        return merged
+        if rules and rules[-1].kind == "span":
+            return prefix + [
+                RichText("span", rules[-1].name, children=tuple(merged), locator=at)
+            ]
+        return prefix + merged
 
     return RichText(children=tuple(visit(element, locator, previous, True) or ()))
 

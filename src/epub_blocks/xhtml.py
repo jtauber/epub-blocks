@@ -6,13 +6,15 @@ import unicodedata
 
 from ._content import (
     RichText,
+    SourceContext,
     build_rich_text,
     child_locator,
+    markup_rules,
     normalize_rich_text,
     slice_rich_text,
 )
 from .errors import EpubBlocksError
-from .models import ContentOptions, Fragment, NormalizationOptions
+from .models import ContentOptions, Fragment, MarkupRule, NormalizationOptions
 from .safety import EpubArchive
 from .xml import XmlElement, local_name, parse_xml
 
@@ -20,6 +22,55 @@ EPUB_TYPE = "{http://www.idpf.org/2007/ops}type"
 XHTML_BODY = "{http://www.w3.org/1999/xhtml}body"
 _DEFAULT_NORMALIZATION = NormalizationOptions()
 _ELEMENT_PATH = re.compile(r"[1-9][0-9]*(?:\.[1-9][0-9]*)*")
+
+
+class DocumentCache(dict[str, XmlElement]):
+    """Per-extraction document and original-structure cache."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.contexts: dict[str, SourceContext] = {}
+
+
+def document_context(cache: dict[str, XmlElement], document: str) -> SourceContext:
+    if isinstance(cache, DocumentCache):
+        if document not in cache.contexts:
+            cache.contexts[document] = SourceContext(cache[document])
+        return cache.contexts[document]
+    return SourceContext(cache[document])
+
+
+def fragment_markup_rules(
+    fragment: Fragment,
+    cache: dict[str, XmlElement],
+    content: ContentOptions,
+    *,
+    validate: bool = True,
+) -> tuple[MarkupRule, ...]:
+    """Match an original source fragment, optionally deferring effect validation."""
+    body = cache[fragment.document_path]
+    element = child_at(body, fragment.element_path)
+    previous: XmlElement | None = None
+    if fragment.element_path:
+        parent_path, _, index = fragment.element_path.rpartition(".")
+        if int(index) > 1:
+            previous = list(child_at(body, parent_path))[int(index) - 2]
+    return markup_rules(
+        element,
+        content,
+        f"{fragment.document_path}#{fragment.element_path}",
+        previous,
+        validate=validate,
+    )
+
+
+def is_leading_milestone(
+    fragment: Fragment, cache: dict[str, XmlElement], content: ContentOptions
+) -> bool:
+    rules = fragment_markup_rules(fragment, cache, content, validate=False)
+    return any(rule.kind == "milestone" for rule in rules) and not any(
+        rule.kind == "milestone" and rule.position == "replace" for rule in rules
+    )
 
 
 def _path_components(element_path: str, location: str) -> tuple[int, ...]:
@@ -224,10 +275,21 @@ def extract_rich_fragment(
     normalization: NormalizationOptions,
     omit_epub_types: frozenset[str],
     content: ContentOptions,
+    milestone_only: bool = False,
 ) -> RichText:
     location = f"{fragment.document_path}#{fragment.element_path}"
     body = read_document_body(epub, fragment.document_path, cache)
     original = child_at(body, fragment.element_path, location)
+    if milestone_only:
+        rules = fragment_markup_rules(fragment, cache, content)
+        if any(rule.label_text for rule in rules) and is_leading_milestone(
+            fragment, cache, content
+        ):
+            raise EpubBlocksError(
+                f"{location}: text-derived leading labels on detached wrappers "
+                "require selecting the wrapper as a source block; its retained "
+                "contents cannot be inferred from descendant fragments"
+            )
     selected = copy.deepcopy(original)
     previous: XmlElement | None = None
     if fragment.element_path:
@@ -257,7 +319,14 @@ def extract_rich_fragment(
         remove_at(selected, path, location)
     tree = normalize_rich_text(
         build_rich_text(
-            selected, location, content, omit_epub_types, previous, origins
+            selected,
+            location,
+            content,
+            omit_epub_types,
+            previous,
+            origins,
+            document_context(cache, fragment.document_path),
+            milestone_only=milestone_only,
         ),
         normalization,
     )

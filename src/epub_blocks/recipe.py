@@ -43,7 +43,13 @@ from .models import (
 )
 from .package import matches, read_epub_package, select_spine_documents
 from .safety import DEFAULT_SAFETY_LIMITS, EpubArchive, SafetyLimits
-from .xhtml import extract_fragment, extract_rich_fragment, normalize_text
+from .xhtml import (
+    DocumentCache,
+    extract_fragment,
+    extract_rich_fragment,
+    is_leading_milestone,
+    normalize_text,
+)
 from .xml import XmlElement
 
 StrPath = str | os.PathLike[str]
@@ -188,7 +194,7 @@ class _OutputSpec:
 
 @dataclass(frozen=True, slots=True)
 class _RecipeSpec:
-    identifier: str
+    identifier: str | None
     sha256: str
     normalization: NormalizationOptions
     omitted_types: frozenset[str]
@@ -1043,7 +1049,11 @@ def _parse_recipe(
 
     epub = _mapping(recipe.get("epub"), f"{location}.epub")
     _check_members(epub, frozenset({"identifier", "sha256"}), f"{location}.epub")
-    identifier = _nonempty_string(epub.get("identifier"), f"{location}.epub.identifier")
+    identifier = (
+        _nonempty_string(epub["identifier"], f"{location}.epub.identifier")
+        if "identifier" in epub
+        else None
+    )
     source_sha256 = _sha256(epub.get("sha256"), f"{location}.epub.sha256")
     normalization = _normalization(
         recipe.get("normalization", {}), f"{location}.normalization"
@@ -1830,6 +1840,7 @@ def _extract_joined_parts(
                     normalization=normalization,
                     omit_epub_types=omitted_types,
                     content=content,
+                    milestone_only=True,
                 ).children
             )
 
@@ -1895,6 +1906,7 @@ def _attach_milestones(
     detached: Sequence[Fragment],
     documents: Sequence[SpineDocument],
     content: ContentOptions,
+    leading: frozenset[Fragment] = frozenset(),
 ) -> tuple[CompiledBlock, ...]:
     if not detached:
         return blocks
@@ -1902,6 +1914,33 @@ def _attach_milestones(
     if markup is None:
         raise EpubBlocksError("detached milestones require markup configuration")
     positions = {doc.path: doc.position for doc in documents}
+
+    # Decide prefix retention independently of output order. An unused wrapper
+    # cannot impose attachment constraints on otherwise freely reordered text.
+    retained = [
+        (part.document_path, part.element_path)
+        for block in blocks
+        for part in block.parts
+        if part.document_path in positions
+    ]
+    retained.extend(
+        (event.document_path, event.element_path)
+        for event in detached
+        if event not in leading
+    )
+    ancestors: set[tuple[str, str]] = set()
+    for document, path in retained:
+        while "." in path:
+            path = path.rpartition(".")[0]
+            ancestors.add((document, path))
+    detached = [
+        event
+        for event in detached
+        if event not in leading
+        or (event.document_path, event.element_path) in ancestors
+    ]
+    if not detached:
+        return blocks
 
     def key(part: Fragment) -> tuple[int, tuple[int, ...], int]:
         return (
@@ -1930,6 +1969,18 @@ def _attach_milestones(
     for event in detached:
         while cursor < len(anchors) and anchors[cursor][0] < key(event):
             cursor += 1
+        if event in leading and cursor < len(anchors):
+            _, block_index, part_index = anchors[cursor]
+            part = blocks[block_index].parts[part_index]
+            if (
+                part.document_path == event.document_path
+                and part.element_path.startswith(event.element_path + ".")
+            ):
+                attachments[block_index].append((part_index, event))
+                continue
+        # Remaining leading bundles belong to retained detached child markers.
+        # Their textless wrappers accompany them under the same next/trailing
+        # policy. Each wrapper contributes only its own leading bundle.
         if cursor < len(anchors):
             if markup.between_blocks != "next":
                 raise EpubBlocksError(
@@ -1967,7 +2018,12 @@ def _recipe_candidates_from_epub(
     *,
     detached: list[Fragment] | None = None,
 ) -> list[TextBlock]:
-    if spec.identifier not in package.identifiers:
+    if spec.identifier is None and package.identifiers:
+        raise EpubBlocksError(
+            f"{path}: epub.identifier is required when the package has "
+            "a nonempty identifier"
+        )
+    if spec.identifier is not None and spec.identifier not in package.identifiers:
         raise EpubBlocksError(
             f"{path}: expected package identifier {spec.identifier!r} not found"
         )
@@ -2036,7 +2092,9 @@ def _compile_from_epub(
                     omit_epub_types=spec.omitted_types,
                     content=spec.content,
                 )
-                for locator in milestones(tree):
+                # Several composed markers may legitimately share one element.
+                # Reusing that element from another fragment is still an error.
+                for locator in dict.fromkeys(milestones(tree)):
                     if locator in retained_events:
                         raise EpubBlocksError(
                             f"{locator}: milestone is emitted more than once"
@@ -2061,7 +2119,25 @@ def _compile_from_epub(
         source.exclude_documents,
         include_non_linear=source.include_non_linear,
     )
-    blocks = _attach_milestones(blocks, detached, documents, spec.content)
+    leading = frozenset(
+        event
+        for event in detached
+        if is_leading_milestone(event, document_cache, spec.content)
+    )
+    blocks = _attach_milestones(blocks, detached, documents, spec.content, leading)
+    # Only actually attached bundles are applied effects. Validate them now,
+    # after output skips/omissions have removed unused wrapper prefixes.
+    for block in blocks:
+        for _, event in (*block.milestones, *block.milestones_after):
+            extract_rich_fragment(
+                epub,
+                event,
+                cache=document_cache,
+                normalization=spec.normalization,
+                omit_epub_types=spec.omitted_types,
+                content=spec.content,
+                milestone_only=True,
+            )
     compiled = CompiledRecipe(
         spec.identifier,
         spec.sha256,
@@ -2108,7 +2184,9 @@ def extract_recipe_candidates(
         with zip_file:
             epub = EpubArchive(zip_file, limits)
             package = read_epub_package(epub)
-            return _recipe_candidates_from_epub(path, spec, epub, package, {})
+            return _recipe_candidates_from_epub(
+                path, spec, epub, package, DocumentCache()
+            )
 
 
 def compile_recipe(
@@ -2143,7 +2221,7 @@ def compile_recipe(
                 spec,
                 epub,
                 package,
-                {},
+                DocumentCache(),
                 verify_digest=verify_digest,
             )
 
@@ -2220,7 +2298,7 @@ def extract_recipe(
         with zip_file:
             epub = EpubArchive(zip_file, limits)
             package = read_epub_package(epub)
-            cache: dict[str, XmlElement] = {}
+            cache = DocumentCache()
             compiled = _compile_from_epub(
                 path,
                 spec,

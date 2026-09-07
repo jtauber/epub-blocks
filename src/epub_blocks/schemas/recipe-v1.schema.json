@@ -23,12 +23,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "identifier",
         "sha256"
       ],
       "properties": {
         "identifier": {
-          "$ref": "#/$defs/nonEmptyString"
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Required at runtime if the EPUB package contains any nonempty dc:identifier. Omit only for identifier-less packages; null and empty strings are invalid."
         },
         "sha256": {
           "$ref": "#/$defs/sha256"
@@ -888,6 +888,10 @@
               "minProperties": 1
             }
           }
+        },
+        {
+          "required": ["attribute_prefixes"],
+          "properties": {"attribute_prefixes": {"minProperties": 1}}
         }
       ],
       "properties": {
@@ -918,10 +922,18 @@
             "type": "string"
           }
         },
+        "attribute_prefixes": {
+          "$ref": "#/$defs/attributePrefixes"
+        },
         "empty": {
           "type": "boolean"
         }
       }
+    },
+    "attributePrefixes": {
+      "type": "object",
+      "propertyNames": {"minLength": 1},
+      "additionalProperties": {"$ref": "#/$defs/nonEmptyString"}
     },
     "elementSelector": {
       "type": "object",
@@ -998,6 +1010,10 @@
           ]
         },
         {
+          "required": ["attribute_prefixes"],
+          "properties": {"attribute_prefixes": {"minProperties": 1}}
+        },
+        {
           "required": [
             "has_child"
           ]
@@ -1036,6 +1052,9 @@
         },
         "previous_sibling": {
           "$ref": "#/$defs/simpleSelector"
+        },
+        "attribute_prefixes": {
+          "$ref": "#/$defs/attributePrefixes"
         },
         "has_child": {
           "$ref": "#/$defs/simpleSelector"
@@ -1123,9 +1142,53 @@
         },
         "label_attribute": {
           "$ref": "#/$defs/nonEmptyString"
+        },
+        "label_text": {
+          "type": "boolean",
+          "default": false
+        },
+        "position": {
+          "enum": ["replace", "before"],
+          "default": "replace"
+        },
+        "label_counter": {
+          "const": "ordered-list"
+        },
+        "continue_matching": {
+          "type": "boolean",
+          "default": false
         }
       },
       "allOf": [
+        {
+          "if": {
+            "required": ["continue_matching"],
+            "properties": {"continue_matching": {"const": true}}
+          },
+          "then": {
+            "required": ["position"],
+            "properties": {
+              "kind": {"const": "milestone"},
+              "position": {"const": "before"}
+            }
+          }
+        },
+        {
+          "if": {"required": ["position"]},
+          "then": {"properties": {"kind": {"const": "milestone"}}}
+        },
+        {
+          "if": {"required": ["label_counter"]},
+          "then": {
+            "required": ["position"],
+            "properties": {
+              "kind": {"const": "milestone"},
+              "position": {"const": "before"},
+              "label_text": {"const": false}
+            },
+            "not": {"required": ["label_attribute"]}
+          }
+        },
         {
           "if": {
             "required": [
@@ -1139,6 +1202,17 @@
               }
             }
           }
+        },
+        {
+          "if": {"required": ["label_text"]},
+          "then": {"properties": {"kind": {"const": "milestone"}}}
+        },
+        {
+          "if": {
+            "required": ["label_text"],
+            "properties": {"label_text": {"const": true}}
+          },
+          "then": {"not": {"required": ["label_attribute"]}}
         }
       ]
     },

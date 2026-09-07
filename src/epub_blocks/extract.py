@@ -11,8 +11,9 @@ from zipfile import BadZipFile, ZipFile
 
 from ._content import (
     EPUB_TYPE,
+    SourceContext,
     build_rich_text,
-    markup_rule,
+    markup_rules,
     milestones,
     normalize_rich_text,
     plain_text,
@@ -31,8 +32,12 @@ from .models import (
 from .package import matches, read_epub_package, select_spine_documents
 from .safety import DEFAULT_SAFETY_LIMITS, EpubArchive, SafetyLimits
 from .xhtml import (
+    DocumentCache,
+    document_context,
     extract_fragment,
+    extract_rich_fragment,
     flatten_text,
+    is_leading_milestone,
     normalize_text,
     read_document_body,
     remove_descendants_by_epub_type,
@@ -109,7 +114,7 @@ def _extract_blocks_from_epub(
         exclude_documents,
         include_non_linear=include_non_linear,
     )
-    cache = document_cache if document_cache is not None else {}
+    cache = document_cache if document_cache is not None else DocumentCache()
     if content != ContentOptions():
         return _extract_content_blocks(
             epub,
@@ -175,6 +180,11 @@ def _extract_content_blocks(
 ) -> list[TextBlock]:
     blocks: list[TextBlock] = []
 
+    # Compilation decides which pending prefixes survive output selection.
+    # Candidate-only inspection instead validates the prefixes belonging to
+    # the selected candidates/markers once discovery has finished.
+    events = detached if detached is not None else []
+
     def included(element: XmlElement, locator: str) -> bool:
         return not (
             {token.casefold() for token in element.get("class", "").split()}
@@ -185,6 +195,7 @@ def _extract_content_blocks(
 
     for document in documents:
         body = read_document_body(epub, document.path, cache)
+        context = document_context(cache, document.path)
 
         def visit(
             element: XmlElement,
@@ -192,17 +203,11 @@ def _extract_content_blocks(
             previous: XmlElement | None,
             *,
             document: SpineDocument = document,
+            context: SourceContext = context,
         ) -> None:
             locator = f"{document.path}#{path}"
             rule = source_rule(element, content, locator, previous)
-            mark = markup_rule(element, content, locator, previous)
             if rule is not None and rule.action == "skip":
-                return
-            if set(element.get(EPUB_TYPE, "").split()) & omitted_types:
-                if mark is not None:
-                    raise EpubBlocksError(
-                        f"{locator}: retained markup is also semantically omitted"
-                    )
                 return
             tag = local_name(element.tag)
             candidate = (
@@ -216,12 +221,34 @@ def _extract_content_blocks(
                     )
                 )
             )
-            event = mark is not None and mark.kind == "milestone"
-            if candidate or event:
+            if candidate and not included(element, locator):
+                return
+            # Discovery needs the rule shape, not its label values or composed
+            # name validation. Discarded wrappers must not abort extraction.
+            marks = markup_rules(element, content, locator, previous, validate=False)
+            if set(element.get(EPUB_TYPE, "").split()) & omitted_types:
+                if marks:
+                    raise EpubBlocksError(
+                        f"{locator}: retained markup is also semantically omitted"
+                    )
+                return
+            event = any(mark.kind == "milestone" for mark in marks)
+            leading = event and not any(
+                mark.kind == "milestone" and mark.position == "replace"
+                for mark in marks
+            )
+            if candidate or (event and not leading):
                 if not included(element, locator):
                     return
                 tree = normalize_rich_text(
-                    build_rich_text(element, locator, content, omitted_types, previous),
+                    build_rich_text(
+                        element,
+                        locator,
+                        content,
+                        omitted_types,
+                        previous,
+                        source=context,
+                    ),
                     normalization,
                 )
                 text = plain_text(tree)
@@ -236,11 +263,17 @@ def _extract_content_blocks(
                             frozenset(element.get("class", "").split()),
                         )
                     )
-                elif detached is not None:
-                    for event_locator in milestones(tree):
+                else:
+                    # Composed effects share a source element. Attach its complete
+                    # marker bundle once, preserving the rules' order.
+                    for event_locator in dict.fromkeys(milestones(tree)):
                         doc, element_path = event_locator.rsplit("#", 1)
-                        detached.append(Fragment(doc, element_path))
+                        events.append(Fragment(doc, element_path))
                 return
+            if leading:
+                # A prefix belongs to this subtree, not to the next unrelated
+                # block. Compilation will attach it to a retained descendant.
+                events.append(Fragment(document.path, path))
             if content.strict_coverage and (element.text or "").strip():
                 raise EpubBlocksError(f"{locator}: unclaimed element text")
             prev: XmlElement | None = None
@@ -260,6 +293,35 @@ def _extract_content_blocks(
             previous = element
     if not blocks:
         raise EpubBlocksError(f"{source_path}: no text blocks matched the selection")
+    if detached is None:
+        leading = {
+            event for event in events if is_leading_milestone(event, cache, content)
+        }
+        retained = [(block.document_path, block.element_path) for block in blocks]
+        retained.extend(
+            (event.document_path, event.element_path)
+            for event in events
+            if event not in leading
+        )
+        ancestors: set[tuple[str, str]] = set()
+        for document, path in retained:
+            while "." in path:
+                path = path.rpartition(".")[0]
+                ancestors.add((document, path))
+        for event in events:
+            if (
+                event in leading
+                and (event.document_path, event.element_path) in ancestors
+            ):
+                extract_rich_fragment(
+                    epub,
+                    event,
+                    cache=cache,
+                    normalization=normalization,
+                    omit_epub_types=omitted_types,
+                    content=content,
+                    milestone_only=True,
+                )
     return blocks
 
 

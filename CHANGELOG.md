@@ -3,6 +3,62 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.6.0 - 2026-09-07
+
+Recipe format remains `"1"`. New extraction features are opt-in; valid 0.5.0
+recipes retain their outputs and compiled digests without new options.
+
+- Add opt-in `continue_matching: true` on leading milestone rules. Ordered
+  leading markers can compose with a final image/replacing milestone or span
+  on the same source element; ordinary rules retain first-match behavior.
+  Attach coincident markers as one source bundle, preserve slicing and source
+  reuse protections, and reject duplicate effect names per matched element.
+  Keep schema, typed validation, and compiled policy hashing aligned; absent
+  or false options preserve existing digests.
+- Allow recipes to omit `epub.identifier` only for packages with no nonempty
+  identifiers. SHA-256 remains mandatory, supplied identifiers must match,
+  and packages with identifiers still require an identifier pin. Apply the
+  same policy during candidate inspection, compilation, and extraction.
+  Expose `CompiledRecipe.epub_identifier` as `str | None`; retain existing
+  compiled digests and recipe format `"1"`.
+- Add case-sensitive literal `attribute_prefixes` to shared structural
+  selectors, including contextual predicates, source rules, markup, and
+  selective whitespace boundaries.
+- Add opt-in `label_text` milestone labels for numbers or other labels stored
+  as element text. Retained descendant text and configured boundaries form the
+  label; whitespace collapses independently of prose normalization. Labels
+  remain zero-width, preserve leading zeroes, and work with both serializers.
+- Reject empty text labels, non-boolean options, span usage, and simultaneous
+  text/attribute label sources; retain nested-milestone protection.
+- Add `position: "before"` milestones that retain matched content, including
+  nested spans/events, and attach only within their source subtree.
+- Preserve leading bundles on textless wrappers containing retained detached
+  child markers. Attach wrapper and child events once in source order under
+  the configured next/trailing policy, while still discarding labels from
+  genuinely empty or fully omitted wrappers.
+- Add `label_counter: "ordered-list"` for decimal list ordinals derived from
+  original HTML structure, including starts, value resets, reversed and nested
+  lists. Filtering/omissions do not renumber items or leak their labels.
+- Validate and hash leading/counter policy consistently across recipes,
+  public models, and schema; existing default-policy digests remain unchanged.
+- Keep exact attribute matching and opaque attribute-derived labels unchanged;
+  existing recipes retain their compiled digests when prefixes are absent.
+- Require explicit wrapper selection for leading text-derived labels when only
+  descendant fragments would otherwise be retained. Reject ambiguous detached
+  labels instead of restoring omitted, skipped, or sliced-away source text.
+- Apply candidate filters before markup validation and validate detached leading
+  bundles only when attached to retained content. Unused wrappers cannot fail
+  extraction because of irrelevant labels or duplicate effects; applied effects
+  and all original ordinals in a used list still receive full validation.
+- Discard unused leading bundles before enforcing detached-marker output-order
+  constraints. Reordered output without retained detached events remains valid;
+  retained prefixes and child markers still require source-ordered fragments.
+- Wrap corrupt DEFLATE member failures as contextual extraction errors across
+  reader APIs and the CLI, preserving their cause, read budget, and any existing
+  output file.
+- Add regression and failure-path tests for retention, label ownership, prefix
+  removal, XML encodings, and atomic output; raise the coverage floor to 99%.
+
 ## 0.5.0 - 2026-09-06
 
 - Add `extract_recipe_candidates` for source inspection with the same
