@@ -250,6 +250,7 @@ def _extract_content_blocks(
                         source=context,
                     ),
                     normalization,
+                    content.markup,
                 )
                 text = plain_text(tree)
                 if text or (rule is not None and rule.keep_empty):

@@ -366,6 +366,7 @@ def extract_rich_fragment(
             milestone_only=milestone_only,
         ),
         normalization,
+        content.markup,
     )
     if fragment.start is not None and fragment.end is not None:
         tree = slice_rich_text(tree, fragment.start, fragment.end)

@@ -331,6 +331,29 @@ class VerbatimAndSourceOrderTests(unittest.TestCase):
             first,
         )
 
+    def test_source_order_rejects_parent_and_descendant_fragment_ownership(
+        self,
+    ) -> None:
+        epub, recipe, markup = self.sample(
+            '<img src="start.png"/><div><p>Reading.</p></div>'
+        )
+        markup["attachment_order"] = "source"
+        cast(dict[str, object], recipe["output"])["insertions"] = [
+            {
+                "after": "text/chapter.xhtml#2.1",
+                "outputs": [
+                    {
+                        "type": "paragraph",
+                        "parts": [
+                            {"document": "text/chapter.xhtml", "element_path": "2"}
+                        ],
+                    }
+                ],
+            }
+        ]
+        with self.assertRaisesRegex(EpubBlocksError, "non-overlapping source subtrees"):
+            compile_recipe(epub, recipe, verify_digest=False)
+
 
 if __name__ == "__main__":
     unittest.main()

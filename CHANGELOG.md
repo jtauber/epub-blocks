@@ -3,6 +3,34 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.8.0 - 2026-09-09
+
+Recipe format remains `"1"`. All new options are opt-in; existing valid
+0.7.0 recipes keep their output fields and compiled digests when those
+options are absent.
+
+- Add opt-in literal markup serialization, allowing symmetric span tokens and
+  single-token milestones without an escaping layer. Existing formats remain
+  unchanged.
+- Add markup-aware outer whitespace trimming, explicit source-newline removal,
+  exact attribute-label prefix removal, and explicit ignoring of detached
+  milestones. All are recipe-driven and included in compiled-policy hashes.
+- Allow fixed identifier templates to use `{element_path}`, taken from the
+  first retained source fragment of each output. This supports structural
+  reference systems without a fixed-ID rule for every source block. Joins,
+  replacements and insertions use the same explicit first-fragment rule;
+  duplicate generated IDs remain errors. Counter templates are unchanged.
+  Recipe format remains `"1"`; existing compiled digests remain unchanged.
+- Add optional `output.identifiers.element_path_root` for structural IDs
+  relative to an inner container. Validate component boundaries and reject
+  referenced paths outside the root; keep all source locators and provenance
+  body-relative. Literal IDs and counter-based references remain unchanged.
+
+Literal serialization intentionally has no general decoding or round-trip
+guarantee. Use XML or escaped delimiters when unambiguous markup is required.
+TSV remains headerless and unquoted; literal TAB, CR and LF in fields are
+still rejected.
+
 ## 0.7.0 - 2026-09-09
 
 Recipe format remains `"1"`. New extraction features are opt-in; existing

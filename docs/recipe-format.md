@@ -1,7 +1,7 @@
 # Recipe format
 
 This document specifies `epub-blocks` recipe version 1 as implemented by
-epub-blocks 0.7.0. A recipe is a self-contained structural program that turns
+epub-blocks 0.8.0. A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
 The recipe generates its output identifiers and types. It does not refer to a
@@ -19,7 +19,7 @@ it is not a runtime input.
 | `normalization` | no | Controls text normalization. |
 | `omit_epub_types` | no | Removes descendants with listed EPUB semantic types. |
 | `source_blocks` | yes | Selects candidate source blocks. |
-| `text` | no | Nested-block boundaries and optional XML/delimiter markup. |
+| `text` | no | Nested-block boundaries and optional XML, escaped-delimiter or literal markup. |
 | `xml_repairs` | no | Guarded UTF-8 source-markup repairs before XML parsing. |
 | `output` | yes | Defines groups, identifiers, types, and exceptions. |
 
@@ -296,7 +296,7 @@ unchanged.
 The other optional member is `text.markup`, fully specified in
 [Marked-up text](markup.md). It supports XML fragments or configurable
 delimiters, spans, attribute-labeled milestones, escaping, and explicit
-between-block attachment policies. Both serializers preserve the same
+between-block attachment policies. All serializers preserve the same
 references and underlying normalized text.
 Version 0.6.0 also supports
 [`label_text: true`](markup.md#text-derived-labels-060) for milestone
@@ -469,8 +469,53 @@ Every emission has a nonempty `type` and one of four roles:
 - `line-start`: allocate a new block number and the first nested line number;
 - `line`: allocate the next line under the most recent `line-start` in the
   current group; or
-- `fixed`: render the required `id`, which can contain `{group}` but does not
-  advance a counter.
+- `fixed`: render the required `id`, which can contain `{group}` and
+  `{element_path}`, but does not advance a counter.
+
+### Source element paths in fixed IDs (0.8.0)
+
+Fixed IDs can additionally use `{element_path}` to generate references from
+the first retained fragment's one-based path inside the XHTML body:
+
+```json
+"default": {
+  "type": "paragraph",
+  "role": "fixed",
+  "id": "{group}.{element_path}"
+}
+```
+
+For group `01` and source path `2.3`, this generates `01.2.3`. A skipped block
+does not renumber later paths. The field uses the first **emitted** fragment,
+not an omitted join candidate or the insertion/replacement anchor. This rule
+also applies to joins, sliced replacements and source-anchored insertions.
+An insertion can instead use a literal path in its fixed ID when its intended
+reference is based on its anchor. The path of a whole-body fragment is empty.
+Templates that render empty or produce duplicate IDs are rejected; multiple
+outputs sliced from one element need distinct literal suffixes or counter IDs.
+
+The new field is supported only in fixed IDs, not the block/line counter
+templates. Existing fixed IDs using only `{group}` or literal text retain
+their behavior and compiled digests. Source paths and final output IDs remain
+pinned in the compiled plan; there is no additional reference-table input.
+
+For archives with extra outer containers, `output.identifiers` can set
+`"element_path_root": "1.1"`. Every fixed-ID `{element_path}` field then uses
+the path relative to that container: source path `1.1.2.3` renders as `2.3`.
+The root is a nonempty, one-based, dot-separated path relative to the XHTML
+body, applied across documents. Every first retained fragment whose ID uses
+this field must lie **strictly below** the root; equal or unrelated paths are
+errors (including `1.10` when the root is `1.1`). Skips still do not renumber.
+
+This changes identifier rendering only. Source selection, matching locators,
+group transitions, insertion anchors, fragment paths and compiled provenance
+continue to use the full body-relative paths. It neither unwraps elements nor
+limits extraction coverage. Fixed IDs without an actual `{element_path}` field
+(including escaped literal `{{element_path}}`) and block/line counters are
+unaffected. In particular, an inserted note with a literal anchor-derived ID
+need not be inside the configured container. The resulting IDs and original
+source paths are both pinned in the compiled plan; existing recipes without
+this option keep their behavior and digests.
 
 An emission may also set `allow_empty: true` (default `false`). This permits
 an intentionally empty output but does not itself retain empty source

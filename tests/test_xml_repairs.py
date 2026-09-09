@@ -226,6 +226,39 @@ class XmlRepairTests(unittest.TestCase):
         with self.assertRaises(EpubBlocksError):
             compile_recipe(epub, recipe, verify_digest=False)
 
+    def test_repair_cannot_shrink_an_oversized_source_past_the_input_limit(
+        self,
+    ) -> None:
+        epub, recipe, data = self.sample("<p>" + "x" * 5000 + "</p>")
+        self.repair(recipe, data, "x" * 5000, "Short.")
+        original = epub.read_bytes()
+        with self.assertRaisesRegex(EpubBlocksError, "too large before repair"):
+            compile_recipe(
+                epub,
+                recipe,
+                verify_digest=False,
+                limits=SafetyLimits(max_xml_bytes=2000),
+            )
+        self.assertEqual(epub.read_bytes(), original)
+
+    def test_non_utf8_source_is_readable_but_cannot_use_utf8_repairs(self) -> None:
+        source = (
+            '<?xml version="1.0" encoding="ISO-8859-1"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>caf\u00e9</p></body></html>'
+        ).encode("latin-1")
+        epub = make_epub(self.directory, documents={"text/chapter.xhtml": source})
+        recipe = minimal_recipe(
+            epub_sha256=hashlib.sha256(epub.read_bytes()).hexdigest()
+        )
+        self.assertEqual(
+            [b.text for b in extract_recipe_candidates(epub, recipe)], ["café"]
+        )
+        self.repair(recipe, source, "<p>", '<p class="body">')
+        original = epub.read_bytes()
+        with self.assertRaisesRegex(EpubBlocksError, "XML repairs require UTF-8"):
+            compile_recipe(epub, recipe, verify_digest=False)
+        self.assertEqual(epub.read_bytes(), original)
+
     def test_source_hash_checked_before_repairs(self) -> None:
         epub, recipe, data = self.sample()
         self.repair(recipe, data)

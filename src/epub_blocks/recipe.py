@@ -181,6 +181,7 @@ class _IdentifierSpec:
     block_start: int
     line_template: str | None
     line_start: int
+    element_path_root: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -618,7 +619,7 @@ def _emission_spec(value: Mapping[str, object], location: str) -> _EmissionSpec:
         _validate_template(
             block_id,
             f"{location}.id",
-            allowed_fields=frozenset({"group"}),
+            allowed_fields=frozenset({"group", "element_path"}),
             required_fields=frozenset(),
         )
     return _EmissionSpec(
@@ -793,7 +794,9 @@ def _validate_template(
 
 def _identifiers_spec(value: object, location: str) -> _IdentifierSpec:
     identifiers = _mapping(value, location)
-    _check_members(identifiers, frozenset({"block", "line"}), location)
+    _check_members(
+        identifiers, frozenset({"block", "line", "element_path_root"}), location
+    )
     block = _mapping(identifiers.get("block"), f"{location}.block")
     _check_members(block, frozenset({"template", "start"}), f"{location}.block")
     block_template = _nonempty_string(
@@ -821,7 +824,16 @@ def _identifiers_spec(value: object, location: str) -> _IdentifierSpec:
             required_fields=frozenset({"block", "number"}),
         )
         line_start = _integer(line.get("start", 1), f"{location}.line.start", minimum=0)
-    return _IdentifierSpec(block_template, block_start, line_template, line_start)
+    element_path_root: str | None = None
+    if "element_path_root" in identifiers:
+        root_location = f"{location}.element_path_root"
+        element_path_root = _nonempty_string(
+            identifiers["element_path_root"], root_location
+        )
+        _validate_element_path(element_path_root, root_location, allow_empty=False)
+    return _IdentifierSpec(
+        block_template, block_start, line_template, line_start, element_path_root
+    )
 
 
 def _produced_block(value: object, location: str) -> _ProducedBlockSpec:
@@ -1372,12 +1384,30 @@ class _IdentifierAllocator:
         group: str,
         location: str,
         *,
+        element_path: str,
         preserve_line_state: bool = False,
     ) -> str:
         if emission.role == "fixed":
             if emission.block_id is None:
                 raise AssertionError("fixed emission validated with an identifier")
-            block_id = self._render(emission.block_id, {"group": group}, location)
+            root = self.spec.element_path_root
+            uses_path = any(
+                field == "element_path"
+                for _, field, _, _ in Formatter().parse(emission.block_id)
+            )
+            if root is not None and uses_path:
+                prefix = root + "."
+                if not element_path.startswith(prefix):
+                    raise EpubBlocksError(
+                        f"{location}: source path {element_path!r} is not below "
+                        f"element_path_root {root!r}"
+                    )
+                element_path = element_path[len(prefix) :]
+            block_id = self._render(
+                emission.block_id,
+                {"group": group, "element_path": element_path},
+                location,
+            )
             if not preserve_line_state:
                 self.line_blocks.pop(group, None)
                 self.next_lines.pop(group, None)
@@ -1438,7 +1468,11 @@ def _compiled_produced_block(
     preserve_line_state: bool = False,
 ) -> CompiledBlock:
     block_id = allocator.allocate(
-        produced.emission, group, location, preserve_line_state=preserve_line_state
+        produced.emission,
+        group,
+        location,
+        element_path=produced.parts[0].element_path,
+        preserve_line_state=preserve_line_state,
     )
     return CompiledBlock(
         block_id,
@@ -1675,6 +1709,7 @@ def _compile_blocks(
             emission,
             group,
             f"source rule at {block.source_locator!r}",
+            element_path=emitted[0].element_path,
         )
         compiled.append(
             CompiledBlock(
@@ -1968,7 +2003,7 @@ def _extract_joined_parts(
                     ),
                 )
             )
-        joined = join_rich_text(trees, separator, normalization)
+        joined = join_rich_text(trees, separator, normalization, content.markup)
         joined = replace(
             joined, children=joined.children + events_at(attachments, len(parts))
         )
@@ -2101,6 +2136,8 @@ def _attach_milestones(
         # Their textless wrappers accompany them under the same next/trailing
         # policy. Each wrapper contributes only its own leading bundle.
         if cursor < len(anchors):
+            if markup.between_blocks == "ignore":
+                continue
             if markup.between_blocks != "next":
                 raise EpubBlocksError(
                     f"{_fragment_locator(event)}: detached milestone needs between_blocks: next"
@@ -2108,6 +2145,8 @@ def _attach_milestones(
             _, block_index, part_index = anchors[cursor]
             attachments[block_index].append((part_index, event))
         else:
+            if markup.trailing == "ignore":
+                continue
             if markup.trailing != "previous":
                 raise EpubBlocksError(
                     f"{_fragment_locator(event)}: trailing milestone needs trailing: previous"

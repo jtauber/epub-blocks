@@ -9,13 +9,12 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
-Version **0.7.0** adds
-[variable-length joining](docs/recipe-format.md#variable-length-joining-070),
-[preserved preformatted whitespace](docs/markup.md#preserving-preformatted-whitespace-070),
-[source-order milestone attachment before output reordering](docs/markup.md#attaching-milestones-before-reordering-070),
-and [guarded XML repairs](docs/recipe-format.md#guarded-xml-repairs-070).
-It also accepts empty XHTML DTD internal subsets without loading external
-resources or enabling custom entity declarations.
+Version **0.8.0** adds
+[literal markup and exact whitespace controls](docs/markup.md#literal-notation-and-exact-whitespace-080),
+exact milestone-label prefix removal, and
+[source-path identifiers](docs/recipe-format.md#source-element-paths-in-fixed-ids-080),
+optionally relative to an inner container. Existing 0.7.0 recipes retain their
+outputs and compiled digests when these options are absent.
 
 ## Installation
 
@@ -33,7 +32,7 @@ The package:
 - selects source documents and blocks with case-insensitive globs;
 - normalizes extracted text and omits configured EPUB semantic elements;
 - derives groups from source paths, heading markers, or explicit transitions;
-- generates flat and nested identifiers with per-group counters;
+- generates flat and nested identifiers with per-group counters or source paths;
 - assigns output types through ordered source-block rules;
 - handles joins, splits, omissions, skipped blocks, and inserted material;
 - selects whole compound blocks and intentional empty structural blocks;
@@ -75,8 +74,8 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.7.0.
-Existing valid 0.6.0 recipes keep their extracted fields and compiled digest
+Recipe version 1 remains the serialized format in epub-blocks 0.8.0.
+Existing valid 0.7.0 recipes keep their extracted fields and compiled digest
 when the new options are absent. TSV serialization uses literal fields,
 instead of CSV-style quoting:
 
@@ -174,6 +173,14 @@ text is escaped so it cannot be mistaken for markup. See the
 [markup contract](docs/markup.md) for the complete configuration, grammar,
 escaping rules, normalization, slicing, and attachment semantics.
 
+The third format, `"literal"`, supports established notations such as
+`"paragraph": ["¶", "¶"]` or `"line-break": ["∥", ""]` without an escaping
+layer. It uses the same extraction policy, but source text may collide with
+markup tokens: **literal output is not generally reversible**. Use XML or
+escaped delimiters for unambiguous downstream decoding. Literal mode also
+leaves raw control characters untouched; the TSV writer still rejects TAB,
+CR and LF in fields.
+
 ## Selective whitespace
 
 A recipe can distinguish layout spans from ordinary word wrappers:
@@ -265,11 +272,11 @@ uv run coverage erase
 uv run coverage run -m unittest discover -s tests
 uv run coverage report
 uv run python -m build
-uv run twine check dist/*
+uv run twine check --strict dist/*
 uv run pyright --verifytypes epub_blocks --ignoreexternal
 ```
 
-Coverage includes branches and enforces a 99% minimum. Tests build synthetic
+Coverage includes branches and enforces a 99.5% minimum. Tests build synthetic
 EPUBs; no EPUB files are committed. See
 [CONTRIBUTING.md](https://github.com/jtauber/epub-blocks/blob/main/CONTRIBUTING.md)
 and [CHANGELOG.md](https://github.com/jtauber/epub-blocks/blob/main/CHANGELOG.md).

@@ -54,6 +54,7 @@ class MarkupRule:
     label_counter: str | None = None
     continue_matching: bool = False
     preserve_whitespace: bool = False
+    label_strip_prefix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,8 @@ class MarkupOptions:
     between_blocks: str = "error"
     trailing: str = "error"
     attachment_order: str = "output"
+    strip_outer_whitespace: bool = False
+    remove_source_newlines: bool = False
 
 
 @dataclass(frozen=True)

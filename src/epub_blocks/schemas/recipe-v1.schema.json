@@ -408,10 +408,16 @@
         },
         "line": {
           "$ref": "#/$defs/counter"
+        },
+        "element_path_root": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(\\.[1-9][0-9]*)*$(?![\\s\\S])",
+          "description": "Since 0.8.0: fixed-ID element_path fields are relative to this body-relative container path. Every such first retained fragment must lie strictly below it. Source locators and literal IDs are unchanged."
         }
       }
     },
     "emission": {
+      "description": "An output emission. Fixed id templates accept group and, since 0.8.0, element_path (the first retained source fragment's body-relative path). Templates are also validated by the runtime.",
       "type": "object",
       "required": [
         "type"
@@ -1172,6 +1178,9 @@
         "label_attribute": {
           "$ref": "#/$defs/nonEmptyString"
         },
+        "label_strip_prefix": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
         "label_text": {
           "type": "boolean",
           "default": false
@@ -1196,6 +1205,10 @@
         {
           "if": {"required": ["preserve_whitespace"]},
           "then": {"properties": {"kind": {"const": "span"}}}
+        },
+        {
+          "if": {"required": ["label_strip_prefix"]},
+          "then": {"required": ["label_attribute"]}
         },
         {
           "if": {
@@ -1257,7 +1270,27 @@
       "type": "object",
       "allOf": [
         {
+          "if": {"required": ["format"], "properties": {"format": {"const": "literal"}}},
+          "then": {
+            "properties": {
+              "delimiters": {"additionalProperties": {
+                "items": {"not": {"pattern": "[\\t\\r\\n]"}},
+                "contains": {"type": "string", "minLength": 1}
+              }}
+            }
+          },
+          "else": {
+            "properties": {
+              "delimiters": {"additionalProperties": {
+                "uniqueItems": true,
+                "items": {"minLength": 1, "not": {"pattern": "\\\\"}}
+              }}
+            }
+          }
+        },
+        {
           "if": {
+            "not": {"required": ["format"], "properties": {"format": {"const": "literal"}}},
             "required": ["rules"],
             "properties": {
               "rules": {
@@ -1285,10 +1318,13 @@
           "enum": ["output", "source"],
           "default": "output"
         },
+        "strip_outer_whitespace": {"type": "boolean", "default": false},
+        "remove_source_newlines": {"type": "boolean", "default": false},
         "format": {
           "enum": [
             "xml",
-            "delimiters"
+            "delimiters",
+            "literal"
           ],
           "default": "xml"
         },
@@ -1308,27 +1344,24 @@
             "type": "array",
             "minItems": 2,
             "maxItems": 2,
-            "uniqueItems": true,
             "items": {
-              "type": "string",
-              "minLength": 1,
-              "not": {
-                "pattern": "\\\\"
-              }
+              "type": "string"
             }
           }
         },
         "between_blocks": {
           "enum": [
             "next",
-            "error"
+            "error",
+            "ignore"
           ],
           "default": "error"
         },
         "trailing": {
           "enum": [
             "previous",
-            "error"
+            "error",
+            "ignore"
           ],
           "default": "error"
         }

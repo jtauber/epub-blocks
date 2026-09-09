@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "epub-blocks"
-version = "0.7.0"
+version = "0.8.0"
 description = "Recipe-driven extraction of structured text blocks from EPUB files"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -63,6 +63,6 @@ branch = true
 source = ["epub_blocks"]
 
 [tool.coverage.report]
-fail_under = 99
+fail_under = 99.5
 precision = 1
 show_missing = true

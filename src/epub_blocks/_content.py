@@ -159,15 +159,23 @@ def markup_options(value: object, location: str) -> MarkupOptions:
             "between_blocks",
             "trailing",
             "attachment_order",
+            "strip_outer_whitespace",
+            "remove_source_newlines",
         },
         location,
     )
     format_name = string(spec.get("format", "xml"), location + ".format")
-    if format_name not in {"xml", "delimiters"}:
-        raise EpubBlocksError(f"{location}.format: expected xml or delimiters")
+    if format_name not in {"xml", "delimiters", "literal"}:
+        raise EpubBlocksError(
+            f"{location}.format: expected xml, delimiters, or literal"
+        )
     between = string(spec.get("between_blocks", "error"), location + ".between_blocks")
     trailing = string(spec.get("trailing", "error"), location + ".trailing")
-    if between not in {"next", "error"} or trailing not in {"previous", "error"}:
+    if between not in {"next", "error", "ignore"} or trailing not in {
+        "previous",
+        "error",
+        "ignore",
+    }:
         raise EpubBlocksError(f"{location}: invalid milestone attachment policy")
     order = string(
         spec.get("attachment_order", "output"), location + ".attachment_order"
@@ -191,6 +199,7 @@ def markup_options(value: object, location: str) -> MarkupOptions:
                 "label_counter",
                 "continue_matching",
                 "preserve_whitespace",
+                "label_strip_prefix",
             },
             at,
         )
@@ -208,6 +217,13 @@ def markup_options(value: object, location: str) -> MarkupOptions:
         )
         if kind == "span" and label is not None:
             raise EpubBlocksError(f"{at}: label_attribute is only valid for milestones")
+        label_prefix = (
+            string(rule["label_strip_prefix"], at + ".label_strip_prefix")
+            if "label_strip_prefix" in rule
+            else None
+        )
+        if label_prefix is not None and label is None:
+            raise EpubBlocksError(f"{at}: label_strip_prefix requires label_attribute")
         label_text = boolean(rule.get("label_text", False), at + ".label_text")
         if kind == "span" and "label_text" in rule:
             raise EpubBlocksError(f"{at}: label_text is only valid for milestones")
@@ -255,6 +271,7 @@ def markup_options(value: object, location: str) -> MarkupOptions:
                 counter,
                 continuing,
                 preserve,
+                label_prefix,
             )
         )
     delimiters = object_value(spec.get("delimiters", {}), location + ".delimiters")
@@ -263,6 +280,23 @@ def markup_options(value: object, location: str) -> MarkupOptions:
     for name, item in sorted(delimiters.items()):
         if name not in kinds:
             raise EpubBlocksError(f"{location}.delimiters: unused name {name!r}")
+        if format_name == "literal":
+            literal_pair = array(item, location + ".delimiters")
+            if (
+                len(literal_pair) != 2
+                or not all(isinstance(token, str) for token in literal_pair)
+                or not any(literal_pair)
+            ):
+                raise EpubBlocksError(
+                    f"{location}.delimiters: literal mode needs two strings, at least one nonempty"
+                )
+            pair = cast(tuple[str, str], tuple(literal_pair))
+            if any(char in "\t\r\n" for token in pair for char in token):
+                raise EpubBlocksError(
+                    f"{location}.delimiters: literal tokens must not contain TAB, CR or LF"
+                )
+            pairs.append((name, pair))
+            continue
         pair = strings(item, location + ".delimiters")
         if len(pair) != 2 or any("\\" in token for token in pair):
             raise EpubBlocksError(
@@ -283,10 +317,23 @@ def markup_options(value: object, location: str) -> MarkupOptions:
         raise EpubBlocksError(
             f"{location}.delimiters: preserved-whitespace escapes reserve n, r, t; tokens must not contain TAB, CR or LF"
         )
-    if format_name == "delimiters" and set(delimiters) != set(kinds):
+    if format_name in {"delimiters", "literal"} and set(delimiters) != set(kinds):
         raise EpubBlocksError(f"{location}.delimiters: every markup name needs a pair")
     return MarkupOptions(
-        format_name, tuple(rules), tuple(pairs), between, trailing, order
+        format_name,
+        tuple(rules),
+        tuple(pairs),
+        between,
+        trailing,
+        order,
+        boolean(
+            spec.get("strip_outer_whitespace", False),
+            location + ".strip_outer_whitespace",
+        ),
+        boolean(
+            spec.get("remove_source_newlines", False),
+            location + ".remove_source_newlines",
+        ),
     )
 
 
@@ -411,6 +458,11 @@ def content_value(content: ContentOptions) -> dict[str, object]:
                     ),
                     **({"label_text": True} if rule.label_text else {}),
                     **(
+                        {"label_strip_prefix": rule.label_strip_prefix}
+                        if rule.label_strip_prefix is not None
+                        else {}
+                    ),
+                    **(
                         {"position": rule.position}
                         if rule.position != "replace"
                         else {}
@@ -433,6 +485,16 @@ def content_value(content: ContentOptions) -> dict[str, object]:
             "between_blocks": markup.between_blocks,
             "trailing": markup.trailing,
             **(
+                {"strip_outer_whitespace": True}
+                if markup.strip_outer_whitespace
+                else {}
+            ),
+            **(
+                {"remove_source_newlines": True}
+                if markup.remove_source_newlines
+                else {}
+            ),
+            **(
                 {"attachment_order": markup.attachment_order}
                 if markup.attachment_order != "output"
                 else {}
@@ -452,6 +514,14 @@ def validate_content(value: object) -> ContentOptions:
                 rule.keep_empty, f"compiled content.element_rules[{index}].keep_empty"
             )
         if value.markup is not None:
+            boolean(
+                value.markup.strip_outer_whitespace,
+                "compiled content.markup.strip_outer_whitespace",
+            )
+            boolean(
+                value.markup.remove_source_newlines,
+                "compiled content.markup.remove_source_newlines",
+            )
             for index, mark in enumerate(value.markup.rules, 1):
                 boolean(
                     mark.label_text,
@@ -763,6 +833,16 @@ def build_rich_text(
                 raise EpubBlocksError(
                     f"{at}: milestone label attribute {rule.label_attribute!r} is missing or empty"
                 )
+            if rule.label_strip_prefix is not None:
+                if (
+                    label is None
+                    or not label.startswith(rule.label_strip_prefix)
+                    or label == rule.label_strip_prefix
+                ):
+                    raise EpubBlocksError(
+                        f"{at}: milestone label must start with label_strip_prefix and retain a nonempty suffix"
+                    )
+                label = label[len(rule.label_strip_prefix) :]
             if rule.label_text:
                 # Source skips, omissions, original context, and nested boundaries
                 # apply to label content, but markup does not become label syntax.
@@ -838,7 +918,9 @@ def build_rich_text(
     return RichText(children=tuple(visit(element, locator, previous, True) or ()))
 
 
-def normalize_rich_text(tree: RichText, options: NormalizationOptions) -> RichText:
+def normalize_rich_text(
+    tree: RichText, options: NormalizationOptions, markup: MarkupOptions | None = None
+) -> RichText:
     def coalesce(node: RichText) -> RichText:
         children: list[str | RichText] = []
         for item in node.children:
@@ -916,7 +998,53 @@ def normalize_rich_text(tree: RichText, options: NormalizationOptions) -> RichTe
             ),
         )
 
-    return rebuild(tree)
+    result = rebuild(tree)
+    if markup is not None and (
+        markup.strip_outer_whitespace or markup.remove_source_newlines
+    ):
+        result = clean_markup_whitespace(result, markup)
+    return result
+
+
+def clean_markup_whitespace(tree: RichText, markup: MarkupOptions) -> RichText:
+    """Apply opt-in cleanup before slicing; markers stop outer trimming."""
+
+    def clean(node: RichText) -> RichText:
+        return replace(
+            node,
+            children=tuple(
+                (child.replace("\n", "") if markup.remove_source_newlines else child)
+                if isinstance(child, str)
+                else clean(child)
+                for child in node.children
+            ),
+        )
+
+    result = clean(tree)
+    if not markup.strip_outer_whitespace:
+        return result
+
+    def trim(node: RichText, reverse: bool) -> tuple[RichText, bool]:
+        if node.kind != "root":
+            return node, False
+        children = list(reversed(node.children)) if reverse else list(node.children)
+        trimming = True
+        for index, child in enumerate(children):
+            if not trimming:
+                break
+            if isinstance(child, str):
+                child = child.rstrip() if reverse else child.lstrip()
+                children[index] = child
+                trimming = not child
+            else:
+                children[index], trimming = trim(child, reverse)
+        if reverse:
+            children.reverse()
+        return replace(node, children=tuple(children)), trimming
+
+    result, _ = trim(result, False)
+    result, _ = trim(result, True)
+    return result
 
 
 def slice_rich_text(tree: RichText, start: int, end: int) -> RichText:
@@ -949,14 +1077,17 @@ def slice_rich_text(tree: RichText, start: int, end: int) -> RichText:
 
 
 def join_rich_text(
-    trees: Sequence[RichText], separator: str, options: NormalizationOptions
+    trees: Sequence[RichText],
+    separator: str,
+    options: NormalizationOptions,
+    markup: MarkupOptions | None = None,
 ) -> RichText:
     children: list[str | RichText] = []
     for index, tree in enumerate(trees):
         if index:
             children.append(separator)
         children.extend(tree.children)
-    return normalize_rich_text(RichText(children=tuple(children)), options)
+    return normalize_rich_text(RichText(children=tuple(children)), options, markup)
 
 
 def render_rich_text(tree: RichText, markup: MarkupOptions | None) -> str:
@@ -969,6 +1100,8 @@ def render_rich_text(tree: RichText, markup: MarkupOptions | None) -> str:
     controls = any(rule.preserve_whitespace for rule in markup.rules)
 
     def escape(value: str, *, attribute: bool = False) -> str:
+        if markup.format == "literal":
+            return value
         if markup.format == "xml":
             if _INVALID_XML_CHARACTER.search(value):
                 raise EpubBlocksError(

@@ -1,20 +1,21 @@
 # Marked-up text
 
-This is the marked-up text contract as implemented in epub-blocks 0.7.0.
+This is the marked-up text contract as implemented in epub-blocks 0.8.0.
 It extends recipe version `"1"`; it does not introduce a separate recipe format.
 
 Version 0.6.0 additionally supports
 `attribute_prefixes` in shared selectors. For example, a page milestone rule
 can match `{"tag": "span", "empty": true, "attribute_prefixes": {"id": "page_"}}`
 and use `"label_attribute": "id"`. Only page-prefixed IDs match, and labels
-retain their complete source value. The serialization contract is unchanged.
+retain their complete source value unless the recipe explicitly opts into
+`label_strip_prefix` (added in 0.8.0).
 
 The output remains headerless `id`, `type`, `text` TSV. With `text.markup`
 enabled, the third column contains a marked-up intermediate. A separate
 consumer can derive plain text and stand-off annotations together. This
 package does not produce that stand-off output or define its schema.
 
-## One extraction policy, two serializations
+## One extraction policy, three serializations
 
 ```json
 "text": {
@@ -51,6 +52,11 @@ digest. The format choice does not change block IDs, types, normalized text,
 or span/milestone positions. Both formats can use the same rules and delimiter
 table; the table is optional for XML but required for every used name in
 delimiter mode. Defined but unused names are rejected.
+
+A third format, `"literal"`, uses the same rules and offsets but emits source
+text and configured tokens without escaping. It supports ambiguous legacy
+notation and does not promise reversible decoding. See
+[literal notation](#literal-notation-and-exact-whitespace-080) before choosing it.
 
 For a source paragraph containing emphasis and an inline page marker:
 
@@ -423,7 +429,7 @@ an empty, unselected wrapper has no retained descendant to attach to.
 
 The public `MarkupRule` gains `continue_matching: bool = False`. JSON Schema,
 recipe parsing, compiled-model validation, candidate inspection, extraction,
-and both serializers use the same policy. Recipe format remains `"1"`.
+and all serializers use the same policy. Recipe format remains `"1"`.
 
 ## XML fragment grammar and escaping
 
@@ -446,6 +452,9 @@ doubled or wrapped in extra quotes. Characters forbidden by XML 1.0 (for example
 introduced by a join separator) cause an error rather than invalid XML output.
 
 ## Delimiter grammar and escaping
+
+For legacy literal notation, see the opt-in mode below. The existing
+`delimiters` format keeps its strict grammar and escaping unchanged.
 
 Each name has a two-item `[opening, closing]` array. Both tokens must be
 nonempty and different. Across all names, tokens must be distinct and
@@ -471,7 +480,59 @@ Choose a TSV-safe delimiter table; for labels containing such characters, XML
 serialization represents them with character references. The extraction API
 can still return strings that are not representable as plain TSV fields.
 
+## Literal notation and exact whitespace (0.8.0)
+
+`text.markup.format: "literal"` emits configured tokens, source text and
+labels verbatim. Unlike `delimiters`, it does **not** insert backslash escapes.
+Each name still needs a two-string entry in `delimiters`, but the strings may
+be identical or share prefixes, and one may be empty. At least one token in
+each pair must be nonempty. Tokens cannot contain TAB, CR or LF.
+
+For example, `"paragraph": ["¶", "¶"]` wraps a span in the same token on
+both sides; `"line-break": ["∥", ""]` emits an unlabeled milestone as a
+single token. No new block types, references, or reading text are invented.
+
+This format deliberately has **no general decoding or round-trip guarantee**:
+literal source text can collide with configured tokens. Use it only when
+matching an established literal convention. It is not HTML and must be
+escaped for display on the web. TSV output still rejects raw TAB, CR and LF;
+literal mode does not quote or conceal them. It also does not use the
+preformatted `\\n`/`\\t` escape layer, even if a span preserves whitespace.
+
+Two independent, opt-in markup settings apply before slicing and rendering:
+
+- `strip_outer_whitespace: true` removes whitespace outside the marked-up
+  fragment. Span and milestone nodes stop trimming, including empty markers;
+  padding inside an outer span is retained. This is distinct from ordinary
+  `normalization.strip`, which trims the decoded reading across markup.
+- `remove_source_newlines: true` removes source LF characters from text nodes.
+  It does not collapse spaces, remove non-breaking spaces, modify labels or
+  remove line-break milestones. XML parsing has already normalized source
+  CR/CRLF line endings. Explicit newline removal also applies inside preserved
+  spans; it should not be enabled for preformatted text needing those LFs.
+
+Both default to `false` and work in XML and escaped-delimiter formats too.
+They run after ordinary normalization. To preserve raw spacing while trimming
+only outside markup, set `normalization.collapse_whitespace` and
+`normalization.strip` to `false`, then enable `strip_outer_whitespace`.
+Candidate readings, slice offsets, joined output and serializers use the same
+cleaned tree. Existing policies with absent/false options retain their digests.
+
+A milestone with an attribute label may use `label_strip_prefix`, a nonempty
+literal prefix. For example, `label_attribute: "id"` with
+`label_strip_prefix: "page"` changes label `page31` to `31`. A missing prefix
+or empty suffix is an error. This is exact prefix removal, not numeric parsing
+or global replacement; `page003` retains `003`.
+
+Finally, `between_blocks: "ignore"` and `trailing: "ignore"` explicitly
+discard otherwise detached milestones in their respective positions. Inline
+milestones inside selected chunks remain. Existing source-safety, label and
+attachment validation still apply; this is not a rule for dropping text.
+Subtree-owned leading events still follow retained descendants.
+
 ## Milestones between blocks
+
+### Default attachment behavior
 
 This section describes the default **replacing** milestones. Leading events
 use the subtree-bound attachment rules above.
@@ -543,7 +604,7 @@ markup boundary** is rejected: assigning the resulting character to one side
 would require an annotation decision. For example, `e<em>&#x301;</em>` cannot be
 silently NFC-composed while retaining that exact boundary. Adjust the source
 rule or explicitly select `unicode_normalization: "none"`. Ordinary NFC within
-spans and across transparent wrappers is supported. The two serializers share
+spans and across transparent wrappers is supported. All serializers share
 the same check.
 
 Empty slices and a prefix consuming all text remain errors. Intentional empty
@@ -552,6 +613,14 @@ and `allow_empty` in the output rule. Such rows are an alternative to attaching
 a zero-width milestone, not a requirement to count separators as paragraphs.
 
 ## Compatibility and scope
+
+0.8.0 adds opt-in literal serialization, markup-aware outer trimming, source
+LF removal, exact attribute-label prefix removal and explicit ignoring of
+detached milestones. Without these options, valid 0.7.0 recipes retain their
+fields and compiled digests. Explicit `strip_outer_whitespace: false` and
+`remove_source_newlines: false` are equivalent to omission. Literal mode does
+not use the escaping or decoding contract of `delimiters`, including the
+preformatted control-character escapes introduced in 0.7.0.
 
 0.7.0 adds opt-in preserved-whitespace spans and source-order milestone
 attachment. Without those options, valid 0.6.0 recipes retain their fields
@@ -574,7 +643,7 @@ grammar, and milestone attachment behavior are unchanged.
 Without the new options, extracted fields and compiled digests remain compatible
 with 0.3.0. TSV bytes deliberately change wherever the former writer used
 CSV-style quoting. All new content policies, empty-output permissions, and event attachments
-are pinned in the compiled plan. XML/delimiter serialization changes the plan
+are pinned in the compiled plan. Changing serialization format changes the plan
 digest even though references and underlying text remain the same.
 
 The lower-level `extract_blocks` and `extract_fragments` APIs retain their
