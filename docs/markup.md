@@ -1,6 +1,6 @@
 # Marked-up text
 
-This is the marked-up text contract for epub-blocks 0.6.0.
+This is the marked-up text contract as implemented in epub-blocks 0.7.0.
 It extends recipe version `"1"`; it does not introduce a separate recipe format.
 
 Version 0.6.0 additionally supports
@@ -102,6 +102,52 @@ attached to the start/end of another fragment does not acquire artificial
 whitespace from a rule on its own root; record boundaries already separate
 paragraphs. There is no CSS interpreter or inferred spacing: recipe authors
 choose the structural selectors, sides, and markup deliberately.
+
+## Preserving preformatted whitespace (0.7.0)
+
+A span rule may set `"preserve_whitespace": true` to retain whitespace inside
+that element and its descendants while ordinary prose still uses the recipe's
+normalization policy. Select the entire preformatted element as a source block
+or include it inside a larger selected block; rules do not inherit from ancestors
+outside a selected fragment.
+
+```json
+{"match": {"tag": "pre"}, "kind": "span", "name": "pre", "preserve_whitespace": true}
+```
+
+Leading/trailing spaces, tabs and newlines within the span survive, including
+whitespace-only spans and whitespace at slice/join boundaries. Unicode
+normalization still applies. Candidate text and slice offsets refer to decoded
+logical code points, not the length of serialized escapes. XML parsing still
+performs its normal source line-ending normalization before extraction.
+
+When any rule enables this option, XML serializes tabs and newlines as `&#9;`
+and `&#10;` (carriage returns as `&#13;`). Delimiter mode uses `\t`, `\n` and
+`\r`; literal backslashes remain `\\`. These escapes apply to text and labels
+throughout that marked output. Decoders must distinguish `\n` (one newline)
+from `\\n` (a literal backslash followed by `n`). Delimiter tokens must not
+contain `n`, `r`, `t`, or tab/newline/carriage-return characters when this option
+is enabled, to avoid collisions with escaped delimiter characters.
+
+Each TSV record remains one physical line with exactly three literal tab-separated
+fields. No CSV-style quoting is introduced. The default is `false`; absent and
+explicitly false options retain the previous normalization and digest behavior.
+This option is valid only on spans, not milestones.
+
+## Attaching milestones before reordering (0.7.0)
+
+`text.markup.attachment_order` defaults to `"output"`, retaining the existing
+guard requiring source-ordered fragments when detached milestones are attached.
+Set it to `"source"` when a recipe deliberately relocates text, such as moving a
+footnote from the end of a chapter to its callout. Detached events are resolved
+against source-ordered fragments and then follow their owning fragments into
+output order. `between_blocks` and `trailing` still determine attachment policy.
+
+A trailing event follows the last fragment in source order, even if that
+fragment becomes an earlier part of an output join. Disjoint slices of one
+source element are supported; repeated or overlapping fragments remain errors.
+Overlapping parent/descendant source subtrees are rejected as ambiguous. This
+option neither changes textual readings nor infers a reading order for the book.
 
 ## Markup rules
 
@@ -506,6 +552,13 @@ and `allow_empty` in the output rule. Such rows are an alternative to attaching
 a zero-width milestone, not a requirement to count separators as paragraphs.
 
 ## Compatibility and scope
+
+0.7.0 adds opt-in preserved-whitespace spans and source-order milestone
+attachment. Without those options, valid 0.6.0 recipes retain their fields
+and compiled digests. Explicit `preserve_whitespace: false` and
+`attachment_order: "output"` have the same effective policy as omission.
+Enabling preserved whitespace also enables TSV-safe control-character escapes
+in the chosen markup serialization, as described above.
 
 0.6.0 adds prefix selectors, text-derived and leading labels, ordered-list
 counters, and composed effects. These options are opt-in; valid 0.5.0 recipes

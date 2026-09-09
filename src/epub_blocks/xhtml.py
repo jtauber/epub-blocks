@@ -14,7 +14,13 @@ from ._content import (
     slice_rich_text,
 )
 from .errors import EpubBlocksError
-from .models import ContentOptions, Fragment, MarkupRule, NormalizationOptions
+from .models import (
+    ContentOptions,
+    Fragment,
+    MarkupRule,
+    NormalizationOptions,
+    XmlRepair,
+)
 from .safety import EpubArchive
 from .xml import XmlElement, local_name, parse_xml
 
@@ -27,9 +33,10 @@ _ELEMENT_PATH = re.compile(r"[1-9][0-9]*(?:\.[1-9][0-9]*)*")
 class DocumentCache(dict[str, XmlElement]):
     """Per-extraction document and original-structure cache."""
 
-    def __init__(self) -> None:
+    def __init__(self, xml_repairs: tuple[XmlRepair, ...] = ()) -> None:
         super().__init__()
         self.contexts: dict[str, SourceContext] = {}
+        self.xml_repairs = xml_repairs
 
 
 def document_context(cache: dict[str, XmlElement], document: str) -> SourceContext:
@@ -209,6 +216,36 @@ def read_document_body(
     if document_path in cache:
         return cache[document_path]
     data = epub.read(document_path)
+    if isinstance(cache, DocumentCache):
+        repairs = [r for r in cache.xml_repairs if r.document_path == document_path]
+        if repairs:
+            if len(data) > epub.limits.max_xml_bytes:
+                raise EpubBlocksError(
+                    f"{document_path}: XML document is too large before repair"
+                )
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise EpubBlocksError(
+                    f"{document_path}: XML repairs require UTF-8"
+                ) from error
+            # Offsets always address original bytes, independent of earlier size changes.
+            for repair in sorted(repairs, key=lambda r: r.offset, reverse=True):
+                expected = repair.expected.encode("utf-8")
+                replacement = repair.replacement.encode("utf-8")
+                end = repair.offset + len(expected)
+                if data[repair.offset : end] != expected:
+                    raise EpubBlocksError(
+                        f"{document_path}: XML repair expectation failed at byte {repair.offset}"
+                    )
+                if (
+                    len(data) - len(expected) + len(replacement)
+                    > epub.limits.max_xml_bytes
+                ):
+                    raise EpubBlocksError(
+                        f"{document_path}: XML repair exceeds XML size limit"
+                    )
+                data = data[: repair.offset] + replacement + data[end:]
     root = parse_xml(data, document_path, epub.limits)
     body = root.find(f"./{XHTML_BODY}")
     if body is None:

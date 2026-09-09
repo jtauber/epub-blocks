@@ -1,7 +1,7 @@
 # Recipe format
 
 This document specifies `epub-blocks` recipe version 1 as implemented by
-epub-blocks 0.6.0. A recipe is a self-contained structural program that turns
+epub-blocks 0.7.0. A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
 The recipe generates its output identifiers and types. It does not refer to a
@@ -20,6 +20,7 @@ it is not a runtime input.
 | `omit_epub_types` | no | Removes descendants with listed EPUB semantic types. |
 | `source_blocks` | yes | Selects candidate source blocks. |
 | `text` | no | Nested-block boundaries and optional XML/delimiter markup. |
+| `xml_repairs` | no | Guarded UTF-8 source-markup repairs before XML parsing. |
 | `output` | yes | Defines groups, identifiers, types, and exceptions. |
 
 Unknown members, duplicate JSON members, `NaN`, and infinities are errors.
@@ -309,6 +310,36 @@ with `continue_matching: true`, allowing a page marker and image marker (or a
 page marker and a span) on one element. Ordinary rules still stop at the first
 match; absent/false options preserve existing compiled hashes.
 
+## Guarded XML repairs (0.7.0)
+
+An optional top-level `xml_repairs` array repairs known malformed markup in UTF-8
+content documents in memory before strict XML parsing. It is not automatic HTML recovery
+or an editorial normalization policy. The original EPUB remains unchanged and
+its SHA-256 must still match. Each repair requires:
+
+```json
+"xml_repairs": [{
+  "document": "text/chapter.xhtml",
+  "offset": 120,
+  "expected": "<p>",
+  "replacement": "</p>"
+}]
+```
+
+`offset` is a nonnegative **byte offset in the original archive member**, not a
+character offset or normalized-text position. `expected` must be a nonempty
+UTF-8 string matching the original bytes at that offset; `replacement` may be
+empty. Document paths must be normalized relative archive paths. Repairs must
+not overlap. They are applied from the end of each document toward its start,
+so offsets never depend on earlier replacement lengths. Array order has no
+semantic effect. An unmatched expectation, unused repair document, non-UTF-8
+source, invalid resulting XML or exceeded safety limit fails extraction.
+
+All normal XML/DTD/entity safeguards still apply after repair. Repair policies
+are included in the compiled digest, even when they leave the extracted text
+unchanged. Absence and an empty array preserve previous digest behavior. The
+public `CompiledRecipe.xml_repairs` tuple contains `XmlRepair` records.
+
 ## Output
 
 The `output` object has this shape:
@@ -527,6 +558,41 @@ A rule can combine or discard consecutive candidates:
 The consumed candidates must remain within one group and may not cross a skip,
 replacement, or insertion anchor. All consumed locators are recorded in the
 compiled plan, including candidates that are not emitted.
+
+### Variable-length joining (0.7.0)
+
+Use `consume_while` instead of a fixed count to join a run of candidates:
+
+```json
+{
+  "match": {"tag": "p", "classes_any": ["start", "continuation"]},
+  "type": "paragraph",
+  "consume_while": {"tag": "p", "classes_all": ["continuation"]}
+}
+```
+
+The initial candidate is always included. Each subsequent candidate must match
+`consume_while`, which uses exactly the same criteria and normalized-text matching
+as `match`. The first nonmatching candidate remains available for the next output.
+Runs also stop before another document, another output group, a skipped source,
+or a replacement/reserved source, and immediately after an insertion anchor.
+They do not skip past these boundaries. End of input simply ends the run.
+
+All candidates in the run are emitted in source order, using `separator` (a space
+by default for multiple parts). Other output rules are not evaluated for
+continuation candidates. Source filtering has already happened: omitted source
+elements are not implicit boundaries, so retain an appropriate candidate or
+make the continuation selector stop where a boundary matters.
+
+`consume_while` cannot be combined with `consume`, `emit`, or `remove_prefix`,
+even if the run happens to contain only one candidate. The starting rule alone
+determines type, role and identifier. Spans and milestones remain attached to
+their source fragments; joins do not repair hyphenation or infer line numbers.
+Every consumed locator remains in the compiled plan. Existing recipes and
+compiled digests are unchanged when the option is absent; recipe version is
+still `"1"`.
+
+### Structural prefix removal
 
 A one-fragment rule can remove a required structural prefix:
 

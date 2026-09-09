@@ -15,6 +15,20 @@
     "recipe_version": {
       "const": "1"
     },
+    "xml_repairs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["document", "offset", "expected", "replacement"],
+        "properties": {
+          "document": {"type": "string", "minLength": 1, "pattern": "^(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/\\\\]+(?:/[^/\\\\]+)*$"},
+          "offset": {"type": "integer", "minimum": 0},
+          "expected": {"type": "string", "minLength": 1},
+          "replacement": {"type": "string"}
+        }
+      }
+    },
     "metadata": {
       "type": "object",
       "additionalProperties": true
@@ -580,6 +594,18 @@
     "rule": {
       "allOf": [
         {
+          "if": {"required": ["consume_while"]},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["consume"]},
+                {"required": ["emit"]},
+                {"required": ["remove_prefix"]}
+              ]
+            }
+          }
+        },
+        {
           "$ref": "#/$defs/emission"
         },
         {
@@ -611,6 +637,9 @@
               "type": "integer",
               "minimum": 1,
               "default": 1
+            },
+            "consume_while": {
+              "$ref": "#/$defs/match"
             },
             "emit": {
               "type": "array",
@@ -1157,9 +1186,17 @@
         "continue_matching": {
           "type": "boolean",
           "default": false
+        },
+        "preserve_whitespace": {
+          "type": "boolean",
+          "default": false
         }
       },
       "allOf": [
+        {
+          "if": {"required": ["preserve_whitespace"]},
+          "then": {"properties": {"kind": {"const": "span"}}}
+        },
         {
           "if": {
             "required": ["continue_matching"],
@@ -1218,8 +1255,36 @@
     },
     "markup": {
       "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "required": ["rules"],
+            "properties": {
+              "rules": {
+                "contains": {
+                  "required": ["preserve_whitespace"],
+                  "properties": {"preserve_whitespace": {"const": true}}
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "delimiters": {
+                "additionalProperties": {
+                  "items": {"not": {"pattern": "[nrt\\t\\r\\n]"}}
+                }
+              }
+            }
+          }
+        }
+      ],
       "additionalProperties": false,
       "properties": {
+        "attachment_order": {
+          "enum": ["output", "source"],
+          "default": "output"
+        },
         "format": {
           "enum": [
             "xml",

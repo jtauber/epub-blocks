@@ -19,6 +19,7 @@ from .models import (
     NormalizationOptions,
     SpineDocument,
     TextBlock,
+    XmlRepair,
 )
 from .package import inspect_epub
 from .recipe import (
@@ -52,6 +53,7 @@ __all__ = [
     "SafetyLimits",
     "SpineDocument",
     "TextBlock",
+    "XmlRepair",
     "__version__",
     "compile_recipe",
     "compile_recipe_file",

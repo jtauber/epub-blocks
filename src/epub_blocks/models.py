@@ -53,6 +53,7 @@ class MarkupRule:
     position: str = "replace"
     label_counter: str | None = None
     continue_matching: bool = False
+    preserve_whitespace: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class MarkupOptions:
     delimiters: tuple[tuple[str, tuple[str, str]], ...] = ()
     between_blocks: str = "error"
     trailing: str = "error"
+    attachment_order: str = "output"
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,16 @@ class CompiledBlock:
 
 
 @dataclass(frozen=True)
+class XmlRepair:
+    """A guarded UTF-8 byte replacement in an original content document."""
+
+    document_path: str
+    offset: int
+    expected: str
+    replacement: str
+
+
+@dataclass(frozen=True)
 class CompiledRecipe:
     """The deterministic extraction plan produced from a version 1 recipe."""
 
@@ -149,6 +161,7 @@ class CompiledRecipe:
     skipped_locators: tuple[str, ...] = ()
     reserved_locators: tuple[str, ...] = ()
     content: ContentOptions = DEFAULT_CONTENT
+    xml_repairs: tuple[XmlRepair, ...] = ()
 
 
 @dataclass(frozen=True)

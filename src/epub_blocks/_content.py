@@ -151,7 +151,16 @@ def element_rules(value: object, location: str) -> tuple[ElementRule, ...]:
 def markup_options(value: object, location: str) -> MarkupOptions:
     spec = object_value(value, location)
     members(
-        spec, {"format", "rules", "delimiters", "between_blocks", "trailing"}, location
+        spec,
+        {
+            "format",
+            "rules",
+            "delimiters",
+            "between_blocks",
+            "trailing",
+            "attachment_order",
+        },
+        location,
     )
     format_name = string(spec.get("format", "xml"), location + ".format")
     if format_name not in {"xml", "delimiters"}:
@@ -160,6 +169,11 @@ def markup_options(value: object, location: str) -> MarkupOptions:
     trailing = string(spec.get("trailing", "error"), location + ".trailing")
     if between not in {"next", "error"} or trailing not in {"previous", "error"}:
         raise EpubBlocksError(f"{location}: invalid milestone attachment policy")
+    order = string(
+        spec.get("attachment_order", "output"), location + ".attachment_order"
+    )
+    if order not in {"output", "source"}:
+        raise EpubBlocksError(f"{location}.attachment_order: expected output or source")
     rules: list[MarkupRule] = []
     kinds: dict[str, str] = {}
     for i, item in enumerate(array(spec.get("rules", []), location + ".rules"), 1):
@@ -176,6 +190,7 @@ def markup_options(value: object, location: str) -> MarkupOptions:
                 "position",
                 "label_counter",
                 "continue_matching",
+                "preserve_whitespace",
             },
             at,
         )
@@ -224,6 +239,11 @@ def markup_options(value: object, location: str) -> MarkupOptions:
             raise EpubBlocksError(
                 f"{at}: continue_matching requires a milestone with position: before"
             )
+        preserve = boolean(
+            rule.get("preserve_whitespace", False), at + ".preserve_whitespace"
+        )
+        if "preserve_whitespace" in rule and kind != "span":
+            raise EpubBlocksError(f"{at}: preserve_whitespace is only valid for spans")
         rules.append(
             MarkupRule(
                 selector(rule.get("match"), at + ".match"),
@@ -234,6 +254,7 @@ def markup_options(value: object, location: str) -> MarkupOptions:
                 position,
                 counter,
                 continuing,
+                preserve,
             )
         )
     delimiters = object_value(spec.get("delimiters", {}), location + ".delimiters")
@@ -256,9 +277,17 @@ def markup_options(value: object, location: str) -> MarkupOptions:
                 )
             tokens.append(token)
         pairs.append((name, (pair[0], pair[1])))
+    if any(rule.preserve_whitespace for rule in rules) and any(
+        char in "nrt\t\r\n" for token in tokens for char in token
+    ):
+        raise EpubBlocksError(
+            f"{location}.delimiters: preserved-whitespace escapes reserve n, r, t; tokens must not contain TAB, CR or LF"
+        )
     if format_name == "delimiters" and set(delimiters) != set(kinds):
         raise EpubBlocksError(f"{location}.delimiters: every markup name needs a pair")
-    return MarkupOptions(format_name, tuple(rules), tuple(pairs), between, trailing)
+    return MarkupOptions(
+        format_name, tuple(rules), tuple(pairs), between, trailing, order
+    )
 
 
 def whitespace(value: object, location: str) -> str:
@@ -392,12 +421,22 @@ def content_value(content: ContentOptions) -> dict[str, object]:
                         else {}
                     ),
                     **({"continue_matching": True} if rule.continue_matching else {}),
+                    **(
+                        {"preserve_whitespace": True}
+                        if rule.preserve_whitespace
+                        else {}
+                    ),
                 }
                 for rule in markup.rules
             ],
             "delimiters": {name: list(pair) for name, pair in markup.delimiters},
             "between_blocks": markup.between_blocks,
             "trailing": markup.trailing,
+            **(
+                {"attachment_order": markup.attachment_order}
+                if markup.attachment_order != "output"
+                else {}
+            ),
         }
     return result
 
@@ -421,6 +460,10 @@ def validate_content(value: object) -> ContentOptions:
                 boolean(
                     mark.continue_matching,
                     f"compiled content.markup.rules[{index}].continue_matching",
+                )
+                boolean(
+                    mark.preserve_whitespace,
+                    f"compiled content.markup.rules[{index}].preserve_whitespace",
                 )
         serialized = content_value(value)
         rules = element_rules(
@@ -565,6 +608,7 @@ class RichText:
     label: str | None = None
     children: tuple[str | RichText, ...] = ()
     locator: str = ""
+    preserve_whitespace: bool = False
 
 
 def plain_text(tree: RichText) -> str:
@@ -781,7 +825,13 @@ def build_rich_text(
                 merged.append(item)
         if rules and rules[-1].kind == "span":
             return prefix + [
-                RichText("span", rules[-1].name, children=tuple(merged), locator=at)
+                RichText(
+                    "span",
+                    rules[-1].name,
+                    children=tuple(merged),
+                    locator=at,
+                    preserve_whitespace=rules[-1].preserve_whitespace,
+                )
             ]
         return prefix + merged
 
@@ -800,29 +850,41 @@ def normalize_rich_text(tree: RichText, options: NormalizationOptions) -> RichTe
 
     tree = coalesce(tree)
     leaves: list[str] = []
+    protected: list[bool] = []
 
-    def collect(node: RichText) -> None:
+    def collect(node: RichText, preserve: bool = False) -> None:
+        preserve = preserve or node.preserve_whitespace
         for child in node.children:
             if isinstance(child, str):
                 leaves.append(child)
+                protected.append(preserve)
             else:
-                collect(child)
+                collect(child, preserve)
 
     collect(tree)
     raw = "".join(leaves)
     start = len(raw) - len(raw.lstrip()) if options.strip else 0
     end = len(raw.rstrip()) if options.strip else len(raw)
+    if any(protected):
+        # A preserved region, including its leading/trailing whitespace, is
+        # part of the reading. Only unprotected outer whitespace may be trimmed.
+        offset = 0
+        for leaf, preserve in zip(leaves, protected, strict=True):
+            if preserve and leaf:
+                start = min(start, offset)
+                end = max(end, offset + len(leaf))
+            offset += len(leaf)
     position = 0
     last_space = False
     whitespace_normalized: list[str] = []
-    for leaf in leaves:
+    for leaf, preserve in zip(leaves, protected, strict=True):
         chars: list[str] = []
         for char in leaf:
             keep = start <= position < end
             position += 1
             if not keep:
                 continue
-            if options.collapse_whitespace and char.isspace():
+            if options.collapse_whitespace and not preserve and char.isspace():
                 if not last_space:
                     chars.append(" ")
                 last_space = True
@@ -904,6 +966,7 @@ def render_rich_text(tree: RichText, markup: MarkupOptions | None) -> str:
     reserved = {"\\"} | {
         char for pair in pairs.values() for token in pair for char in token
     }
+    controls = any(rule.preserve_whitespace for rule in markup.rules)
 
     def escape(value: str, *, attribute: bool = False) -> str:
         if markup.format == "xml":
@@ -914,10 +977,14 @@ def render_rich_text(tree: RichText, markup: MarkupOptions | None) -> str:
             # XML parsers normalize literal CRs in text and all literal
             # whitespace in attributes. Character references preserve them.
             escaped = html.escape(value, quote=attribute).replace("\r", "&#13;")
-            if attribute:
+            if attribute or controls:
                 escaped = escaped.replace("\t", "&#9;").replace("\n", "&#10;")
             return escaped
-        return "".join("\\" + char if char in reserved else char for char in value)
+        escapes = {"\t": "\\t", "\n": "\\n", "\r": "\\r"} if controls else {}
+        return "".join(
+            escapes.get(char, "\\" + char if char in reserved else char)
+            for char in value
+        )
 
     def render(node: RichText) -> str:
         text = "".join(

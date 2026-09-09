@@ -8,6 +8,7 @@ import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 from string import Formatter
 from typing import BinaryIO, cast
@@ -40,6 +41,7 @@ from .models import (
     SpineDocument,
     TextBlock,
     UnicodeNormalization,
+    XmlRepair,
 )
 from .package import matches, read_epub_package, select_spine_documents
 from .safety import DEFAULT_SAFETY_LIMITS, EpubArchive, SafetyLimits
@@ -142,6 +144,7 @@ class _BlockRule:
     match: _MatchSpec
     emission: _EmissionSpec
     consume: int
+    consume_while: _MatchSpec | None
     emit: tuple[int, ...] | None
     separator: str | None
     remove_prefix: _RemovePrefix | None
@@ -201,6 +204,7 @@ class _RecipeSpec:
     source_blocks: _SourceBlocksSpec
     output: _OutputSpec
     content: ContentOptions = DEFAULT_CONTENT
+    xml_repairs: tuple[XmlRepair, ...] = ()
 
 
 def _stream_sha256(source: BinaryIO) -> str:
@@ -703,6 +707,7 @@ def _block_rule(value: object, location: str) -> _BlockRule:
                 "role",
                 "id",
                 "consume",
+                "consume_while",
                 "emit",
                 "separator",
                 "remove_prefix",
@@ -714,6 +719,18 @@ def _block_rule(value: object, location: str) -> _BlockRule:
     emission = _emission_spec(rule, location)
     match = _match_spec(rule.get("match"), f"{location}.match")
     consume = _integer(rule.get("consume", 1), f"{location}.consume", minimum=1)
+    consume_while = (
+        _match_spec(rule["consume_while"], f"{location}.consume_while")
+        if "consume_while" in rule
+        else None
+    )
+    if consume_while is not None and any(
+        name in rule for name in ("consume", "emit", "remove_prefix")
+    ):
+        raise EpubBlocksError(
+            f"{location}.consume_while: cannot combine with consume, emit, or "
+            "remove_prefix"
+        )
     emit = _integer_array(rule["emit"], f"{location}.emit") if "emit" in rule else None
     if emit is not None and max(emit) > consume:
         raise EpubBlocksError(
@@ -739,6 +756,7 @@ def _block_rule(value: object, location: str) -> _BlockRule:
         match,
         emission,
         consume,
+        consume_while,
         emit,
         separator_value,
         remove_prefix,
@@ -1023,6 +1041,48 @@ def _validate_fragment_reuse(
             previous_id, previous_part = block_id, part_index
 
 
+def _xml_repairs(value: object, location: str) -> tuple[XmlRepair, ...]:
+    if not isinstance(value, list):
+        raise EpubBlocksError(f"{location}: must be an array")
+    result: list[XmlRepair] = []
+    for i, item in enumerate(cast(list[object], value), 1):
+        at = f"{location}[{i}]"
+        spec = _mapping(item, at)
+        _check_members(
+            spec, frozenset({"document", "offset", "expected", "replacement"}), at
+        )
+        document = _nonempty_string(spec.get("document"), at + ".document")
+        if "\\" in document or any(
+            part in {"", ".", ".."} for part in document.split("/")
+        ):
+            raise EpubBlocksError(
+                f"{at}.document: must be a normalized relative archive path"
+            )
+        offset = _integer(spec.get("offset"), at + ".offset")
+        if offset < 0:
+            raise EpubBlocksError(f"{at}.offset: must be nonnegative")
+        expected = _nonempty_string(spec.get("expected"), at + ".expected")
+        replacement = spec.get("replacement")
+        if not isinstance(replacement, str):
+            raise EpubBlocksError(f"{at}.replacement: must be a string")
+        try:
+            expected.encode("utf-8")
+            replacement.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise EpubBlocksError(
+                f"{at}: repair strings must be valid UTF-8"
+            ) from error
+        result.append(XmlRepair(document, offset, expected, replacement))
+    ordered = sorted(result, key=lambda r: (r.document_path, r.offset))
+    for a, b in pairwise(ordered):
+        if (
+            a.document_path == b.document_path
+            and a.offset + len(a.expected.encode("utf-8")) > b.offset
+        ):
+            raise EpubBlocksError(f"{location}: repairs must not overlap")
+    return tuple(ordered)
+
+
 def _parse_recipe(
     recipe: Mapping[str, object], location: str, *, require_compiled_hash: bool
 ) -> _RecipeSpec:
@@ -1038,6 +1098,7 @@ def _parse_recipe(
                 "source_blocks",
                 "output",
                 "text",
+                "xml_repairs",
             }
         ),
         location,
@@ -1088,6 +1149,7 @@ def _parse_recipe(
         source_blocks,
         output,
         content,
+        _xml_repairs(recipe.get("xml_repairs", []), location + ".xml_repairs"),
     )
 
 
@@ -1530,6 +1592,22 @@ def _compile_blocks(
         )
         emission = rule.emission if rule is not None else output.default
         consume = rule.consume if rule is not None else 1
+        if rule is not None and rule.consume_while is not None:
+            # The starting candidate always belongs to the run. Continuation
+            # rules never steal specially handled sources or cross scopes.
+            while cursor + consume < len(candidates):
+                following = candidates[cursor + consume]
+                if (
+                    candidates[cursor + consume - 1].locator in insertions
+                    or following.document_path != block.document_path
+                    or groups[cursor + consume] != groups[cursor]
+                    or following.locator in skipped
+                    or following.locator in reserved
+                    or following.locator in replacements
+                    or not _rule_matches(following, rule.consume_while)
+                ):
+                    break
+                consume += 1
         if cursor + consume > len(candidates):
             raise EpubBlocksError(
                 f"source rule at {block.source_locator!r} needs {consume} blocks, "
@@ -1801,6 +1879,32 @@ def compiled_recipe_digest(compiled: CompiledRecipe) -> str:
     policy = content_value(validate_content(compiled.content))
     if policy:
         value["content"] = policy
+    repair_tuple = cast(object, compiled.xml_repairs)
+    if not isinstance(repair_tuple, tuple):
+        raise EpubBlocksError("compiled xml_repairs must be a tuple")
+    repair_values: list[dict[str, object]] = []
+    for repair in cast(tuple[object, ...], repair_tuple):
+        if not isinstance(repair, XmlRepair):
+            raise EpubBlocksError("compiled xml_repairs contains an invalid repair")
+        repair_values.append(
+            {
+                "document": repair.document_path,
+                "offset": repair.offset,
+                "expected": repair.expected,
+                "replacement": repair.replacement,
+            }
+        )
+    if repair_values:
+        validated = _xml_repairs(repair_values, "compiled xml_repairs")
+        value["xml_repairs"] = [
+            {
+                "document": r.document_path,
+                "offset": r.offset,
+                "expected": r.expected,
+                "replacement": r.replacement,
+            }
+            for r in validated
+        ]
     encoded = json.dumps(
         value,
         ensure_ascii=False,
@@ -1959,7 +2063,22 @@ def _attach_milestones(
         raise EpubBlocksError(
             "detached milestones require output fragments from selected source documents"
         )
-    if [item[0] for item in anchors] != sorted(item[0] for item in anchors):
+    if markup.attachment_order == "source":
+        anchors.sort(key=lambda item: item[0])
+        # A parent fragment plus a selected descendant has no unambiguous
+        # owner for intervening source markers. Disjoint slices of the same
+        # element remain supported (fragment reuse validation checks overlaps).
+        for (left, _, _), (right, _, _) in pairwise(anchors):
+            if (
+                left[0] == right[0]
+                and len(left[1]) < len(right[1])
+                and right[1][: len(left[1])] == left[1]
+            ):
+                raise EpubBlocksError(
+                    "source attachment order requires non-overlapping source subtrees"
+                )
+        detached = sorted(detached, key=key)
+    elif [item[0] for item in anchors] != sorted(item[0] for item in anchors):
         raise EpubBlocksError(
             "detached milestones require source-ordered output fragments"
         )
@@ -2138,6 +2257,11 @@ def _compile_from_epub(
                 content=spec.content,
                 milestone_only=True,
             )
+    unused_repairs = {r.document_path for r in spec.xml_repairs} - document_cache.keys()
+    if unused_repairs:
+        raise EpubBlocksError(
+            f"XML repair documents were not used by extraction: {sorted(unused_repairs)}"
+        )
     compiled = CompiledRecipe(
         spec.identifier,
         spec.sha256,
@@ -2147,6 +2271,7 @@ def _compile_from_epub(
         skipped,
         reserved,
         spec.content,
+        spec.xml_repairs,
     )
     actual_digest = compiled_recipe_digest(compiled)
     if verify_digest and spec.output.compiled_sha256 != actual_digest:
@@ -2185,7 +2310,7 @@ def extract_recipe_candidates(
             epub = EpubArchive(zip_file, limits)
             package = read_epub_package(epub)
             return _recipe_candidates_from_epub(
-                path, spec, epub, package, DocumentCache()
+                path, spec, epub, package, DocumentCache(spec.xml_repairs)
             )
 
 
@@ -2221,7 +2346,7 @@ def compile_recipe(
                 spec,
                 epub,
                 package,
-                DocumentCache(),
+                DocumentCache(spec.xml_repairs),
                 verify_digest=verify_digest,
             )
 
@@ -2298,7 +2423,7 @@ def extract_recipe(
         with zip_file:
             epub = EpubArchive(zip_file, limits)
             package = read_epub_package(epub)
-            cache = DocumentCache()
+            cache = DocumentCache(spec.xml_repairs)
             compiled = _compile_from_epub(
                 path,
                 spec,

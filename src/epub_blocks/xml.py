@@ -25,7 +25,7 @@ _SAFE_XHTML_DOCTYPE = re.compile(
     + _QUOTED_LITERAL
     + rb"\s+"
     + _QUOTED_LITERAL
-    + rb"))?\s*>",
+    + rb"))?(?:[ \t\r\n]*\[[ \t\r\n]*\])?\s*>",
 )
 _FORBIDDEN_DECLARATION = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 _NAMED_CHARACTER_REFERENCE = re.compile(rb"&([A-Za-z_:][A-Za-z0-9_.:-]*);")

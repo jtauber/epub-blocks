@@ -9,13 +9,13 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
-Version **0.6.0** adds literal
-[`attribute_prefixes` matching](docs/recipe-format.md#attribute-prefixes-060)
-in shared structural selectors,
-[text-derived milestone labels](docs/markup.md#text-derived-labels-060),
-[content-preserving leading labels and ordered-list counters](docs/markup.md#leading-labels-and-ordered-lists-060),
-[explicit composition of leading and ordinary markup effects](docs/markup.md#composing-effects-on-one-element-060),
-and [hash-only source pins for identifier-less EPUBs](docs/recipe-format.md#epub-pin).
+Version **0.7.0** adds
+[variable-length joining](docs/recipe-format.md#variable-length-joining-070),
+[preserved preformatted whitespace](docs/markup.md#preserving-preformatted-whitespace-070),
+[source-order milestone attachment before output reordering](docs/markup.md#attaching-milestones-before-reordering-070),
+and [guarded XML repairs](docs/recipe-format.md#guarded-xml-repairs-070).
+It also accepts empty XHTML DTD internal subsets without loading external
+resources or enabling custom entity declarations.
 
 ## Installation
 
@@ -75,8 +75,8 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.6.0.
-Existing valid 0.5.0 recipes keep their extracted fields and compiled digest
+Recipe version 1 remains the serialized format in epub-blocks 0.7.0.
+Existing valid 0.6.0 recipes keep their extracted fields and compiled digest
 when the new options are absent. TSV serialization uses literal fields,
 instead of CSV-style quoting:
 
@@ -244,8 +244,11 @@ subtrees. The supported import surface is the names exported by `epub_blocks`.
 EPUB files are untrusted ZIP and XML input. Default APIs bound archive size,
 individual and cumulative reads, compression ratios, XML size, element count,
 and nesting depth. Duplicate or unsafe paths and encrypted members are rejected.
-External DTDs are never loaded; internal subsets, entity declarations, other
+External DTDs are never loaded; nonempty internal subsets, entity declarations, other
 doctypes, and unknown named character references are rejected.
+Version 0.7.0 additionally accepts an empty internal subset (`[]`),
+including XML whitespace between the brackets. The declaration is stripped,
+not interpreted; no custom entities or DTD rules are enabled.
 
 Recipes are trusted local configuration because they contain regular
 expressions. `epub-blocks` never executes EPUB scripts or fetches resources from

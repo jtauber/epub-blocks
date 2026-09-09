@@ -3,6 +3,30 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.7.0 - 2026-09-09
+
+Recipe format remains `"1"`. New extraction features are opt-in; existing
+valid 0.6.0 recipes keep their outputs and compiled digests when the new
+options are absent.
+
+- Add explicit guarded `xml_repairs` for malformed UTF-8 content documents.
+  Original-byte offsets and expected strings are verified before XML parsing;
+  repairs are pinned in the compiled policy and never rewrite the EPUB.
+
+- Add opt-in span `preserve_whitespace` for preformatted regions, with logical
+  code-point offsets and TSV-safe XML/control escapes in delimiter output.
+- Add opt-in `text.markup.attachment_order: "source"` so detached metadata
+  follows its source fragment through explicit output reordering.
+
+- Accept XHTML doctypes with an empty (or XML-whitespace-only) internal subset.
+  Continue stripping, never resolving, external identifiers; reject all actual
+  DTD/entity declarations, non-prolog doctypes, and duplicate doctypes.
+- Add opt-in `consume_while` for variable-length joining of consecutive source
+  candidates. Preserve source order, markup, and consumed-locator provenance;
+  stop at document/group and specially handled source boundaries. Reject
+  conflicting fixed-count, selective-emission, and prefix-removal options.
+  Recipe format remains `"1"`; existing recipes keep their compiled digests.
+
 ## 0.6.0 - 2026-09-07
 
 Recipe format remains `"1"`. New extraction features are opt-in; valid 0.5.0
