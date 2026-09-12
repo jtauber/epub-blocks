@@ -9,12 +9,17 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
-Version **0.8.0** adds
+Version **0.8.1** fixes semantic omissions, whitespace normalization, detached
+marker ownership, malformed-input handling, and TSV permission preservation.
+It also reaches 100% statement and branch test coverage. Affected recipes may
+produce corrected outputs or compiled digests; review regenerated outputs
+before updating pinned digests. See the [changelog](CHANGELOG.md#081---2026-09-13).
+
+Version **0.8.0** introduced
 [literal markup and exact whitespace controls](docs/markup.md#literal-notation-and-exact-whitespace-080),
 exact milestone-label prefix removal, and
 [source-path identifiers](docs/recipe-format.md#source-element-paths-in-fixed-ids-080),
-optionally relative to an inner container. Existing 0.7.0 recipes retain their
-outputs and compiled digests when these options are absent.
+optionally relative to an inner container.
 
 ## Installation
 
@@ -74,10 +79,8 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.8.0.
-Existing valid 0.7.0 recipes keep their extracted fields and compiled digest
-when the new options are absent. TSV serialization uses literal fields,
-instead of CSV-style quoting:
+Recipe version 1 remains the serialized format in epub-blocks 0.8.1.
+TSV serialization uses literal fields, instead of CSV-style quoting:
 
 ```json
 {
@@ -276,7 +279,7 @@ uv run twine check --strict dist/*
 uv run pyright --verifytypes epub_blocks --ignoreexternal
 ```
 
-Coverage includes branches and enforces a 99.5% minimum. Tests build synthetic
+Coverage includes branches and enforces a 100% minimum. Tests build synthetic
 EPUBs; no EPUB files are committed. See
 [CONTRIBUTING.md](https://github.com/jtauber/epub-blocks/blob/main/CONTRIBUTING.md)
 and [CHANGELOG.md](https://github.com/jtauber/epub-blocks/blob/main/CHANGELOG.md).

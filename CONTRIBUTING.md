@@ -27,7 +27,10 @@ uv run twine check --strict dist/*
 uv run pyright --verifytypes epub_blocks --ignoreexternal
 ```
 
-New behavior and bug fixes should include tests. Tests create conforming EPUB
+New behavior and bug fixes should include tests. Statement and branch coverage
+must remain at 100%, including defensive guards. Focused internal-invariant
+tests complement public-API tests where earlier validation normally makes a
+failure path unreachable. Tests create conforming EPUB
 fixtures in temporary directories; do not commit copyrighted EPUB files.
 Release-workflow tests parse the workflow with the development-only PyYAML
 dependency and exercise its publishing commands against a local fake GitHub

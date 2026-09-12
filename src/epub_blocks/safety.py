@@ -118,7 +118,13 @@ class EpubArchive:
         member = self._member(name)
         try:
             data = self._archive.read(member)
-        except (BadZipFile, NotImplementedError, RuntimeError, ZlibError) as error:
+        except (
+            BadZipFile,
+            UnicodeDecodeError,
+            NotImplementedError,
+            RuntimeError,
+            ZlibError,
+        ) as error:
             raise EpubBlocksError(
                 f"EPUB archive member {name!r} could not be read"
             ) from error

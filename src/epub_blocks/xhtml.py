@@ -247,9 +247,16 @@ def read_document_body(
                     )
                 data = data[: repair.offset] + replacement + data[end:]
     root = parse_xml(data, document_path, epub.limits)
-    body = root.find(f"./{XHTML_BODY}")
-    if body is None:
+    if root.tag != "{http://www.w3.org/1999/xhtml}html":
+        raise EpubBlocksError(f"{document_path!r} has an unexpected XHTML root")
+    bodies = list(root.iter(XHTML_BODY))
+    if not bodies:
         raise EpubBlocksError(f"{document_path!r} has no XHTML body")
+    if len(bodies) != 1 or bodies[0] not in root:
+        raise EpubBlocksError(
+            f"{document_path!r} must have exactly one XHTML body, directly inside html"
+        )
+    body = bodies[0]
     cache[document_path] = body
     return body
 

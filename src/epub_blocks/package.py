@@ -145,7 +145,7 @@ def inspect_epub(
     try:
         with ZipFile(path) as archive:
             return read_epub_package(EpubArchive(archive, limits))
-    except BadZipFile as error:
+    except (BadZipFile, UnicodeDecodeError) as error:
         raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
 
 

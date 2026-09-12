@@ -102,6 +102,13 @@ whose whitespace-separated `epub:type` values intersect this set is removed
 while its tail text is preserved. The default is empty. A typical recipe uses
 `["noteref", "pagebreak"]`.
 
+During candidate discovery, an omitted semantic element excludes its entire
+subtree, including candidate roots and candidates nested inside omitted
+wrappers. This policy is identical with or without content rules or
+`strict_coverage`; source locators retain their original child positions.
+Explicit fragment extraction still applies semantic omissions to descendants
+of the selected fragment, not to its root.
+
 ## Candidate source blocks
 
 `source_blocks` supports:
@@ -789,6 +796,10 @@ reader's default quote handling. Embedded TAB, CR, or LF characters in any
 field are rejected; the writer does not normalize them or replace the existing
 output file on failure. XML character references can represent these characters
 inside markup without introducing raw field/record separators.
+
+On POSIX systems, replacing an existing TSV preserves its permission mode.
+New files use private permissions (`0600`). A failure to preserve permissions
+leaves the existing file unchanged, just like a serialization or write failure.
 
 ```bash
 epub-blocks book.epub recipe.json records.tsv

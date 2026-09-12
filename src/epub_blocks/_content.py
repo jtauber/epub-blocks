@@ -1002,7 +1002,12 @@ def normalize_rich_text(
     if markup is not None and (
         markup.strip_outer_whitespace or markup.remove_source_newlines
     ):
-        result = clean_markup_whitespace(result, markup)
+        cleaned = clean_markup_whitespace(result, markup)
+        if cleaned != result:
+            # Removing source LFs can bring combining characters together.
+            # Reach a stable normalized/cleaned reading before matching or
+            # slicing, including the cross-markup normalization safeguard.
+            return normalize_rich_text(cleaned, options, markup)
     return result
 
 

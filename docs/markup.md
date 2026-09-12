@@ -155,6 +155,12 @@ source element are supported; repeated or overlapping fragments remain errors.
 Overlapping parent/descendant source subtrees are rejected as ambiguous. This
 option neither changes textual readings nor infers a reading order for the book.
 
+When detached markers need owners, same-element reuse is checked across all
+in-scope output fragments, including insertions and ordinary emissions, in
+both attachment orders. Reuse requires non-overlapping slices with identical
+omissions. Notes from unselected documents are not marker owners; this check
+does not prohibit their reuse or reuse when there are no detached markers.
+
 ## Markup rules
 
 Rules are ordered and first-match-wins by default, using the structural selectors described
@@ -517,6 +523,13 @@ only outside markup, set `normalization.collapse_whitespace` and
 `normalization.strip` to `false`, then enable `strip_outer_whitespace`.
 Candidate readings, slice offsets, joined output and serializers use the same
 cleaned tree. Existing policies with absent/false options retain their digests.
+
+If cleanup changes the reading, normalization is repeated until the cleaned
+reading is stable, before any matching or slicing. In particular, removing an
+LF between a letter and a combining accent must not leave candidate text in
+a different Unicode form from the final output. If the new adjacency would
+compose across a retained markup boundary, candidate inspection and compilation
+reject it using the usual boundary safeguard. Opaque labels remain unchanged.
 
 A milestone with an attribute label may use `label_strip_prefix`, a nonempty
 literal prefix. For example, `label_attribute: "id"` with

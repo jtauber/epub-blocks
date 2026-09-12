@@ -70,10 +70,16 @@ def _candidate_elements(
     parent: XmlElement,
     primary_tags: frozenset[str],
     fallback_tags: frozenset[str],
+    omit_epub_types: frozenset[str],
     parent_path: tuple[int, ...] = (),
 ) -> Iterator[tuple[XmlElement, tuple[int, ...]]]:
     for index, child in enumerate(list(parent), 1):
         element_path = (*parent_path, index)
+        # Semantic exclusions apply to candidate roots and their enclosing
+        # subtrees, just as they do in content-aware discovery. Keep original
+        # child positions so omissions cannot renumber source locators.
+        if set(child.get(EPUB_TYPE, "").split()) & omit_epub_types:
+            continue
         tag = local_name(child.tag)
         if tag in primary_tags or (
             tag in fallback_tags and not _contains_primary_block(child, primary_tags)
@@ -81,7 +87,7 @@ def _candidate_elements(
             yield child, element_path
         else:
             yield from _candidate_elements(
-                child, primary_tags, fallback_tags, element_path
+                child, primary_tags, fallback_tags, omit_epub_types, element_path
             )
 
 
@@ -133,7 +139,9 @@ def _extract_blocks_from_epub(
         )
     for document in documents:
         body = read_document_body(epub, document.path, cache)
-        for element, address in _candidate_elements(body, primary_tags, fallback_tags):
+        for element, address in _candidate_elements(
+            body, primary_tags, fallback_tags, omit_epub_types
+        ):
             classes = frozenset(element.get("class", "").split())
             if {value.casefold() for value in classes} & excluded_classes:
                 continue
@@ -374,7 +382,7 @@ def extract_blocks(
                 omit_epub_types=omit_epub_types,
                 normalization=normalization,
             )
-    except BadZipFile as error:
+    except (BadZipFile, UnicodeDecodeError) as error:
         raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
 
 
@@ -411,7 +419,7 @@ def extract_fragments(
             source.seek(0)
         try:
             zip_file = ZipFile(source)
-        except BadZipFile as error:
+        except (BadZipFile, UnicodeDecodeError) as error:
             raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
         with zip_file:
             epub = EpubArchive(zip_file, limits)

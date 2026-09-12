@@ -3,6 +3,35 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.8.1 - 2026-09-13
+
+Recipe format remains `"1"`; there are no new recipe options or public APIs.
+This release corrects extraction behavior and rejects malformed or ambiguous
+inputs that previously slipped through validation. Recipes affected by semantic
+omissions or whitespace normalization may produce different outputs or compiled
+digests: review regenerated outputs before updating pinned digests.
+
+- Reach 100% statement and branch coverage with explicit tests for internal
+  invariants and malformed XML prefixes; raise the enforced coverage floor to
+  100% without excluding defensive code from measurement.
+- Apply semantic omissions consistently during plain and content-aware source
+  discovery, including omitted candidate roots and enclosing subtrees. Enabling
+  strict coverage no longer changes the selected readings. Recipes affected by
+  the previous inconsistency need their output and compiled digest reviewed.
+- Stabilize normalization after markup whitespace cleanup before heading
+  matching, reference generation, prefix removal and slicing; detect newly
+  adjacent cross-markup composition during candidate inspection and compilation.
+- Reject ambiguous detached-marker ownership from repeated or overlapping
+  in-scope insertion fragments, in both attachment orders. Preserve valid
+  disjoint slices and out-of-scope auxiliary reuse.
+- Require an XHTML html root and exactly one direct body rather than silently
+  ignoring extra or misplaced bodies.
+- Wrap invalid UTF-8 ZIP filenames in contextual extraction errors, including
+  malformed central-directory and local-header names; retain error causes and
+  the CLI's non-destructive failure behavior.
+- Preserve existing TSV permission modes during atomic replacement; keep new
+  files private and leave the previous file untouched on permission-copy failure.
+
 ## 0.8.0 - 2026-09-09
 
 Recipe format remains `"1"`. All new options are opt-in; existing valid

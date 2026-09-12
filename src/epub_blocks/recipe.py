@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -2098,6 +2099,18 @@ def _attach_milestones(
         raise EpubBlocksError(
             "detached milestones require output fragments from selected source documents"
         )
+    # Insertions do not reserve candidate locators, so replacement-only
+    # validation cannot establish unique ownership of detached markers.
+    # This applies to both attachment orders, but not out-of-scope notes.
+    _validate_fragment_reuse(
+        {
+            f"block {index}": tuple(
+                part for part in block.parts if part.document_path in positions
+            )
+            for index, block in enumerate(blocks, 1)
+        },
+        "milestone attachment",
+    )
     if markup.attachment_order == "source":
         anchors.sort(key=lambda item: item[0])
         # A parent fragment plus a selected descendant has no unambiguous
@@ -2343,7 +2356,7 @@ def extract_recipe_candidates(
         source.seek(0)
         try:
             zip_file = ZipFile(source)
-        except BadZipFile as error:
+        except (BadZipFile, UnicodeDecodeError) as error:
             raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
         with zip_file:
             epub = EpubArchive(zip_file, limits)
@@ -2375,7 +2388,7 @@ def compile_recipe(
         source.seek(0)
         try:
             zip_file = ZipFile(source)
-        except BadZipFile as error:
+        except (BadZipFile, UnicodeDecodeError) as error:
             raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
         with zip_file:
             epub = EpubArchive(zip_file, limits)
@@ -2457,7 +2470,7 @@ def extract_recipe(
         source.seek(0)
         try:
             zip_file = ZipFile(source)
-        except BadZipFile as error:
+        except (BadZipFile, UnicodeDecodeError) as error:
             raise EpubBlocksError(f"{path}: not a valid ZIP container") from error
         with zip_file:
             epub = EpubArchive(zip_file, limits)
@@ -2504,6 +2517,10 @@ def write_tsv(path: StrPath, blocks: Iterable[ExtractedBlock]) -> None:
 
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing_mode = stat.S_IMODE(output_path.stat().st_mode)
+    except FileNotFoundError:
+        existing_mode = None
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -2526,6 +2543,8 @@ def write_tsv(path: StrPath, blocks: Iterable[ExtractedBlock]) -> None:
                         )
                 output.write("\t".join(fields) + "\n")
             output.flush()
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
             os.fsync(output.fileno())
         temporary_path.replace(output_path)
     except BaseException:
