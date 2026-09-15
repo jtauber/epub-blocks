@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use epub-blocks in your research, please cite this software."
+type: software
+title: "epub-blocks"
+abstract: "Recipe-driven extraction of structured text blocks from EPUB files."
+authors:
+  - family-names: "Tauber"
+    given-names: "James"
+    orcid: "https://orcid.org/0000-0001-6534-8866"
+version: "0.8.1"
+date-released: 2026-09-13
+license: MIT
+repository-code: "https://github.com/jtauber/epub-blocks"
+url: "https://github.com/jtauber/epub-blocks"
+keywords:
+  - EPUB
+  - text extraction
+  - digital humanities
