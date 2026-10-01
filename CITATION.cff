@@ -5,7 +5,7 @@ title: "epub-blocks"
 abstract: "Recipe-driven extraction of structured text blocks from EPUB files."
 authors:
   - family-names: "Tauber"
-    given-names: "James"
+    given-names: "James Konrad"
     orcid: "https://orcid.org/0000-0001-6534-8866"
 version: "0.8.1"
 date-released: 2026-09-13
