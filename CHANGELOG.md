@@ -3,6 +3,22 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- Add an experimental, optional Textual recipe-authoring wizard with document
+  selection, editable section codes, tag/class decisions and document overrides,
+  simple verse numbering, Unicode/XML/plain markup presets, validated previews,
+  and private save/resume files. Recipes use the existing version-1 compiler;
+  the core extraction runtime remains dependency-free.
+- Harden the wizard against queued section-code edits, overlapping validation
+  jobs and saves, oversized or deeply nested saved sessions, and conflicts
+  between markup presets and semantic omissions. Propagate terminal UI failures
+  as nonzero command exit statuses.
+- Keep the wizard's reference editor in sync with the files selected in Scope,
+  including resumed and empty selections, without losing previously entered codes.
+- Add Previous/Next reference-file navigation, step-2-only Alt+Left/Alt+Right
+  shortcuts, and a position counter for the selected files.
+
 ## 0.8.1 - 2026-09-13
 
 Recipe format remains `"1"`; there are no new recipe options or public APIs.

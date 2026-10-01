@@ -24,6 +24,9 @@ classifiers = [
 keywords = ["epub", "text extraction", "digital humanities"]
 dependencies = []
 
+[project.optional-dependencies]
+wizard = ["textual>=8.2.8,<9"]
+
 [project.urls]
 Documentation = "https://github.com/jtauber/epub-blocks#readme"
 Issues = "https://github.com/jtauber/epub-blocks/issues"
@@ -31,6 +34,7 @@ Repository = "https://github.com/jtauber/epub-blocks"
 
 [project.scripts]
 epub-blocks = "epub_blocks.cli:main"
+epub-blocks-wizard = "epub_blocks.wizard:main"
 
 [dependency-groups]
 dev = [
@@ -41,6 +45,7 @@ dev = [
   "PyYAML>=6.0.2",
   "ruff>=0.9",
   "twine>=6.2.0",
+  "textual>=8.2.8,<9",
 ]
 
 [tool.setuptools.packages.find]

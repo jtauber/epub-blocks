@@ -32,6 +32,9 @@ must remain at 100%, including defensive guards. Focused internal-invariant
 tests complement public-API tests where earlier validation normally makes a
 failure path unreachable. Tests create conforming EPUB
 fixtures in temporary directories; do not commit copyrighted EPUB files.
+Textual is included in the development dependencies for headless wizard tests;
+it remains an optional `wizard` extra for users. Run those tests alone with
+`uv run python -m unittest discover -s tests -p test_wizard.py`.
 Release-workflow tests parse the workflow with the development-only PyYAML
 dependency and exercise its publishing commands against a local fake GitHub
 CLI; they never contact GitHub or PyPI. They require Bash and `diff` (available

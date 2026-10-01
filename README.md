@@ -27,7 +27,24 @@ optionally relative to an inner container.
 python -m pip install epub-blocks
 ```
 
-The runtime package has no third-party dependencies.
+The core runtime package has no third-party dependencies.
+
+### Interactive recipe wizard (development version)
+
+An optional Textual interface now helps select documents, define section codes,
+classify block patterns, and preview a draft recipe before saving. It uses no
+LLM and generates an ordinary version-1 recipe. Unicode inline markup is the
+default. This feature is not yet in the published 0.8.1 package.
+
+From a development checkout:
+
+```bash
+uv sync --extra wizard
+uv run epub-blocks-wizard book.epub draft.recipe.json
+```
+
+See the [wizard guide](docs/wizard.md) for save/resume, validation, and the
+structural cases that still need manual recipe editing.
 
 ## What it does
 
