@@ -1,5 +1,7 @@
 # epub-blocks
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23081719.svg)](https://doi.org/10.5281/zenodo.23081719)
+
 `epub-blocks` is a dependency-free Python library for reproducibly extracting
 ordered, structured text blocks from EPUB 2 and EPUB 3 files. A declarative
 recipe selects an edition’s XHTML, assigns block types, and generates stable
