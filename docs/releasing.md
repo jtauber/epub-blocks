@@ -5,7 +5,9 @@
 2. Move relevant entries in `CHANGELOG.md` from **Unreleased** to a heading for
    the release version and date.
 3. Set the intended version in `pyproject.toml`, refresh `uv.lock`, and confirm
-   that the lock file is current with `uv lock --check`.
+   that the lock file is current with `uv lock --check`. Update the version and
+   release date in `CITATION.cff` to match the changelog, and replace development-only
+   installation instructions in the README and relevant feature guides.
 4. Run the complete check sequence from `CONTRIBUTING.md` in a clean checkout.
 5. Do not reuse or manually upload files already present in a local `dist/`
    directory. A release must be built from the tagged commit by the release

@@ -6,18 +6,17 @@ to make the editorial decisions. It uses no LLM, network service, existing base
 text, or external reference table. Its output runs with the normal extractor;
 Textual and the saved wizard session are not required to execute the recipe.
 
-This feature is currently available in the development checkout, not 0.8.1 on
-PyPI. From the checkout:
+The wizard is new in 0.9.0. Install the optional interface and launch it with:
 
 ```bash
-uv sync --extra wizard
-uv run epub-blocks-wizard /path/to/book.epub /path/to/draft.recipe.json
+python -m pip install "epub-blocks[wizard]"
+epub-blocks-wizard /path/to/book.epub /path/to/draft.recipe.json
 ```
 
-When installing a build containing the wizard, request the optional extra with
-`pip install "epub-blocks[wizard]"`. The core extraction package still has no
-third-party runtime dependencies. `epub-blocks-wizard --help` works without
-Textual; launching it without the extra prints an installation hint.
+The core extraction package still has no third-party runtime dependencies.
+`epub-blocks-wizard --help` works without Textual; launching it without the extra
+prints an installation hint. From a development checkout, use
+`uv sync --extra wizard` and prefix the commands below with `uv run`.
 
 Use a terminal at least 80 columns wide and 30 rows high; 120 × 45 is more
 comfortable. Tab / Shift-Tab move between controls, arrows move within lists,
@@ -140,7 +139,7 @@ the slot while the underlying extraction is still running. **Save recipe** write
 only the recipe, not a TSV:
 
 ```bash
-uv run epub-blocks /path/to/book.epub /path/to/draft.recipe.json /path/to/book.tsv
+epub-blocks /path/to/book.epub /path/to/draft.recipe.json /path/to/book.tsv
 ```
 
 The recipe pins the source archive's SHA-256 and a package identifier when one
@@ -157,7 +156,7 @@ Saved sessions have an 8 MiB UTF-8 size limit, enforced on both save and resume.
 Exceeding the limit leaves any previous progress file untouched.
 
 ```bash
-uv run epub-blocks-wizard book.epub draft.recipe.json --resume
+epub-blocks-wizard book.epub draft.recipe.json --resume
 ```
 
 Resume verifies the saved state belongs to exactly the same EPUB. Once a recipe
@@ -166,7 +165,7 @@ it cannot safely merge subsequent hand edits. Resume the saved decisions into
 a **new** destination instead:
 
 ```bash
-uv run epub-blocks-wizard book.epub revised.recipe.json \
+epub-blocks-wizard book.epub revised.recipe.json \
   --resume --session draft.recipe.json.wizard.json
 ```
 

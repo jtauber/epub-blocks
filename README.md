@@ -9,17 +9,11 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
-Version **0.8.1** fixes semantic omissions, whitespace normalization, detached
-marker ownership, malformed-input handling, and TSV permission preservation.
-It also reaches 100% statement and branch test coverage. Affected recipes may
-produce corrected outputs or compiled digests; review regenerated outputs
-before updating pinned digests. See the [changelog](CHANGELOG.md#081---2026-09-13).
-
-Version **0.8.0** introduced
-[literal markup and exact whitespace controls](docs/markup.md#literal-notation-and-exact-whitespace-080),
-exact milestone-label prefix removal, and
-[source-path identifiers](docs/recipe-format.md#source-element-paths-in-fixed-ids-080),
-optionally relative to an inner container.
+Version **0.9.0** adds an optional, experimental terminal wizard for authoring
+recipes: select files, define references, classify patterns, preview output,
+and save your decisions. Existing recipes keep their extraction behavior and
+compiled digests, and recipe format remains `"1"`. Statement and branch test
+coverage remain at 100%. See the [changelog](CHANGELOG.md#090---2026-10-01).
 
 ## Installation
 
@@ -29,18 +23,16 @@ python -m pip install epub-blocks
 
 The core runtime package has no third-party dependencies.
 
-### Interactive recipe wizard (development version)
+### Interactive recipe wizard (experimental)
 
 An optional Textual interface now helps select documents, define section codes,
 classify block patterns, and preview a draft recipe before saving. It uses no
 LLM and generates an ordinary version-1 recipe. Unicode inline markup is the
-default. This feature is not yet in the published 0.8.1 package.
-
-From a development checkout:
+default. Install the optional interface with:
 
 ```bash
-uv sync --extra wizard
-uv run epub-blocks-wizard book.epub draft.recipe.json
+python -m pip install "epub-blocks[wizard]"
+epub-blocks-wizard book.epub draft.recipe.json
 ```
 
 See the [wizard guide](docs/wizard.md) for save/resume, validation, and the
@@ -96,7 +88,7 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.8.1.
+Recipe version 1 remains the serialized format in epub-blocks 0.9.0.
 TSV serialization uses literal fields, instead of CSV-style quoting:
 
 ```json

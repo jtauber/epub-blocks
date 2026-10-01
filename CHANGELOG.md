@@ -3,7 +3,11 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.9.0 - 2026-10-01
+
+Recipe format remains `"1"`. Existing recipes retain their extraction behavior
+and compiled digests. This release adds an optional, experimental terminal
+interface for authoring new recipes; the core extractor remains dependency-free.
 
 - Add an experimental, optional Textual recipe-authoring wizard with document
   selection, editable section codes, tag/class decisions and document overrides,
@@ -18,6 +22,8 @@ All notable changes to this project will be documented here. The project uses
   including resumed and empty selections, without losing previously entered codes.
 - Add Previous/Next reference-file navigation, step-2-only Alt+Left/Alt+Right
   shortcuts, and a position counter for the selected files.
+- Add GitHub-compatible citation metadata in `CITATION.cff`, including the
+  author's ORCID.
 
 ## 0.8.1 - 2026-09-13
 
