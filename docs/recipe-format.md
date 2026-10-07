@@ -1,7 +1,6 @@
 # Recipe format
 
-This document specifies `epub-blocks` recipe version 1 in the 0.10.0 source
-tree. Version 0.10.0, including its inline errata extension, is not yet published.
+This document specifies `epub-blocks` recipe version 1 as implemented by 0.10.0.
 A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
@@ -352,8 +351,8 @@ public `CompiledRecipe.xml_repairs` tuple contains `XmlRepair` records.
 
 ## Inline errata (0.10.0)
 
-This extension requires the 0.10.0 source tree until publication; released epub-blocks
-0.9.0 does not support it. Recipe version remains `"1"`.
+This extension requires epub-blocks 0.10.0 or later.
+Recipe version remains `"1"`.
 
 ```json
 "errata": [

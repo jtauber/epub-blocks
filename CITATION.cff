@@ -8,7 +8,8 @@ authors:
     given-names: "James Konrad"
     orcid: "https://orcid.org/0000-0001-6534-8866"
 version: "0.10.0"
-# Add the release date and this version's DOI when 0.10.0 is published.
+date-released: 2026-10-08
+# Add this version's DOI after Zenodo archives the release.
 license: MIT
 repository-code: "https://github.com/jtauber/epub-blocks"
 url: "https://github.com/jtauber/epub-blocks"

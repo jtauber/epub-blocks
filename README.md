@@ -11,11 +11,11 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
-Version **0.10.0**, not yet published, adds native inline errata: explicit,
+Version **0.10.0** adds native inline errata: explicit,
 block-scoped literal corrections after plain-text extraction. Existing recipes
 without errata keep their extraction behavior and compiled digests, and recipe
 format remains `"1"`. Statement and branch test coverage remain at 100%.
-See the [changelog](CHANGELOG.md#0100---unreleased).
+See the [changelog](CHANGELOG.md#0100---2026-10-08).
 
 ## Installation
 
@@ -69,10 +69,10 @@ witness manifests, or emit stand-off annotations.
 It can generate a marked-up TSV for a separate converter to derive plain text
 and stand-off together.
 
-**New in 0.10.0 (unreleased):** recipes can also declare short, block-scoped literal
+**New in 0.10.0:** recipes can also declare short, block-scoped literal
 [errata](docs/recipe-format.md#inline-errata-0100) for plain-text output.
 Each correction must match exactly once after extraction; the library never
-infers editorial choices. This extension is not in the published 0.9.0 package.
+infers editorial choices. Errata require epub-blocks 0.10.0 or later.
 
 ## Inspecting an EPUB
 
