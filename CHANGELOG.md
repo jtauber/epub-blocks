@@ -3,6 +3,17 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.10.0 - Unreleased
+
+- Add optional inline `errata`: ordered, block-scoped, exact-once literal
+  search-and-replace corrections after plain-text extraction. Unknown IDs,
+  missing or ambiguous matches (including overlapping matches), no-op edits,
+  invalid strings, unintended empty blocks, and retained markup are rejected.
+- Include corrections in compiled digests; absent or empty errata preserve
+  existing digests and behavior. Recipe version remains `"1"`.
+- Document the correction contract and add regression tests. This feature is
+  not yet available in a published release.
+
 ## 0.9.0 - 2026-10-01
 
 Recipe format remains `"1"`. Existing recipes retain their extraction behavior

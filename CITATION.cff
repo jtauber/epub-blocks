@@ -7,9 +7,8 @@ authors:
   - family-names: "Tauber"
     given-names: "James Konrad"
     orcid: "https://orcid.org/0000-0001-6534-8866"
-version: "0.9.0"
-date-released: 2026-10-01
-doi: "10.5281/zenodo.23081720"
+version: "0.10.0"
+# Add the release date and this version's DOI when 0.10.0 is published.
 license: MIT
 repository-code: "https://github.com/jtauber/epub-blocks"
 url: "https://github.com/jtauber/epub-blocks"

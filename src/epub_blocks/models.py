@@ -152,6 +152,15 @@ class XmlRepair:
 
 
 @dataclass(frozen=True)
+class Erratum:
+    """One exact-once literal correction to a generated plain-text block."""
+
+    block_id: str
+    find: str
+    replacement: str
+
+
+@dataclass(frozen=True)
 class CompiledRecipe:
     """The deterministic extraction plan produced from a version 1 recipe."""
 
@@ -165,6 +174,7 @@ class CompiledRecipe:
     reserved_locators: tuple[str, ...] = ()
     content: ContentOptions = DEFAULT_CONTENT
     xml_repairs: tuple[XmlRepair, ...] = ()
+    errata: tuple[Erratum, ...] = ()
 
 
 @dataclass(frozen=True)

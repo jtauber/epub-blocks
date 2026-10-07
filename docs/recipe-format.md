@@ -1,13 +1,15 @@
 # Recipe format
 
-This document specifies `epub-blocks` recipe version 1 as implemented by
-epub-blocks 0.8.0. A recipe is a self-contained structural program that turns
+This document specifies `epub-blocks` recipe version 1 in the 0.10.0 source
+tree. Version 0.10.0, including its inline errata extension, is not yet published.
+A recipe is a self-contained structural program that turns
 one pinned EPUB into an ordered sequence of `id`, `type`, and `text` blocks.
 
 The recipe generates its output identifiers and types. It does not refer to a
-pre-existing output table, expected reading, text hash, or character count.
+pre-existing output table, full expected text, text hash, or character count.
 Such material can be used outside epub-blocks to test or review a recipe, but
-it is not a runtime input.
+it is not a runtime input. Optional inline errata contain short search and
+replacement strings, not an external replacement text.
 
 ## Top-level object
 
@@ -21,6 +23,7 @@ it is not a runtime input.
 | `source_blocks` | yes | Selects candidate source blocks. |
 | `text` | no | Nested-block boundaries and optional XML, escaped-delimiter or literal markup. |
 | `xml_repairs` | no | Guarded UTF-8 source-markup repairs before XML parsing. |
+| `errata` | no | New in 0.10.0: ordered, exact-once literal corrections to generated plain-text blocks. |
 | `output` | yes | Defines groups, identifiers, types, and exceptions. |
 
 Unknown members, duplicate JSON members, `NaN`, and infinities are errors.
@@ -346,6 +349,59 @@ All normal XML/DTD/entity safeguards still apply after repair. Repair policies
 are included in the compiled digest, even when they leave the extracted text
 unchanged. Absence and an empty array preserve previous digest behavior. The
 public `CompiledRecipe.xml_repairs` tuple contains `XmlRepair` records.
+
+## Inline errata (0.10.0)
+
+This extension requires the 0.10.0 source tree until publication; released epub-blocks
+0.9.0 does not support it. Recipe version remains `"1"`.
+
+```json
+"errata": [
+  {"id": "01.012", "find": "mis-print", "replace": "misprint"},
+  {"id": "02.003", "find": "word word", "replace": "word"}
+]
+```
+
+Errata are applied after all source selection, joins, splits, reference
+generation, and normalization. They change only a block's text, never its ID,
+type, or position. The original EPUB is not modified. This differs from
+`xml_repairs`, which operates on source bytes before XML parsing.
+
+Each entry has exactly three required string members:
+
+| Member | Meaning |
+| --- | --- |
+| `id` | Exact generated block ID; unknown IDs fail compilation. |
+| `find` | Nonempty literal, case-sensitive text to find in that block. |
+| `replace` | Literal replacement; the empty string deletes the matched text. |
+
+Each `find` must match **exactly once**, including overlapping occurrences.
+Zero or multiple matches fail extraction: there is no fuzzy matching, regular
+expression, global replacement, or silent skipping. `find` and `replace` must
+differ. Quotes, backslashes and Unicode characters are ordinary literal text.
+All three fields must be valid UTF-8 without TAB, CR or LF.
+
+Entries execute in array order; later entries see earlier changes. Use enough
+surrounding context to make a repeated word or punctuation mark unambiguous.
+Replacement text is **not normalized again**: supply the intended whitespace
+and Unicode form explicitly. An edit cannot empty a block unless that block's
+emission has `allow_empty: true`.
+
+Initially, nonempty `errata` is supported only for **plain-text output**.
+Combining it with `text.markup` is rejected, even if a proposed replacement
+appears harmless. Editing retained markup needs a separate, markup-aware
+design. An absent or empty errata array leaves existing recipes, including
+marked-up recipes, unchanged.
+
+The ordered corrections are part of the compiled digest. Changing an erratum
+requires regenerating `output.compiled_sha256`. Absent and empty errata do not
+change existing digests. Compilation validates IDs and correction syntax;
+**extraction** checks actual matches, so compilation alone is not a dry run of
+the corrections. `extract_recipe_candidates` still returns the uncorrected
+source candidates. A CLI extraction failure leaves any existing TSV untouched.
+
+The immutable Python API exposes `Erratum(block_id, find, replacement)` and
+`CompiledRecipe.errata` as a tuple, in application order.
 
 ## Output
 
@@ -764,8 +820,9 @@ locators.
 
 The canonical digest includes all generated IDs and types, fragment selection,
 counter effects, separators, consumed locators, skips, reservations,
-normalization, and EPUB-type omissions. It therefore detects structural rule
-changes even if the resulting prose happens to look similar.
+normalization, EPUB-type omissions, content policies, source XML repairs, and
+ordered inline errata. It therefore detects rule and correction changes even
+if the resulting prose happens to look similar.
 
 While authoring, compile without digest verification and save the result:
 

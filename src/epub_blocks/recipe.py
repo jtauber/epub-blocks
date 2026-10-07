@@ -36,6 +36,7 @@ from .models import (
     ContentOptions,
     ElementRule,
     EpubPackage,
+    Erratum,
     ExtractedBlock,
     Fragment,
     NormalizationOptions,
@@ -207,6 +208,7 @@ class _RecipeSpec:
     output: _OutputSpec
     content: ContentOptions = DEFAULT_CONTENT
     xml_repairs: tuple[XmlRepair, ...] = ()
+    errata: tuple[Erratum, ...] = ()
 
 
 def _stream_sha256(source: BinaryIO) -> str:
@@ -1096,6 +1098,38 @@ def _xml_repairs(value: object, location: str) -> tuple[XmlRepair, ...]:
     return tuple(ordered)
 
 
+def _errata(
+    value: object, location: str, content: ContentOptions
+) -> tuple[Erratum, ...]:
+    if not isinstance(value, list):
+        raise EpubBlocksError(f"{location}: must be an array")
+    result: list[Erratum] = []
+    for index, item in enumerate(cast(list[object], value), 1):
+        at = f"{location}[{index}]"
+        spec = _mapping(item, at)
+        _check_members(spec, frozenset({"id", "find", "replace"}), at)
+        block_id = _nonempty_string(spec.get("id"), at + ".id")
+        find = _nonempty_string(spec.get("find"), at + ".find")
+        replacement = spec.get("replace")
+        if not isinstance(replacement, str):
+            raise EpubBlocksError(f"{at}.replace: must be a string")
+        for field, text in (("id", block_id), ("find", find), ("replace", replacement)):
+            if any(character in text for character in "\t\r\n"):
+                raise EpubBlocksError(f"{at}.{field}: must not contain TAB, CR or LF")
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise EpubBlocksError(f"{at}.{field}: must be valid UTF-8") from error
+        if find == replacement:
+            raise EpubBlocksError(f"{at}: find and replace must differ")
+        result.append(Erratum(block_id, find, replacement))
+    if result and content.markup is not None:
+        raise EpubBlocksError(
+            f"{location}: errata require plain-text output (no markup)"
+        )
+    return tuple(result)
+
+
 def _parse_recipe(
     recipe: Mapping[str, object], location: str, *, require_compiled_hash: bool
 ) -> _RecipeSpec:
@@ -1112,6 +1146,7 @@ def _parse_recipe(
                 "output",
                 "text",
                 "xml_repairs",
+                "errata",
             }
         ),
         location,
@@ -1163,6 +1198,7 @@ def _parse_recipe(
         output,
         content,
         _xml_repairs(recipe.get("xml_repairs", []), location + ".xml_repairs"),
+        _errata(recipe.get("errata", []), location + ".errata", content),
     )
 
 
@@ -1941,6 +1977,28 @@ def compiled_recipe_digest(compiled: CompiledRecipe) -> str:
             }
             for r in validated
         ]
+    errata_tuple = cast(object, compiled.errata)
+    if not isinstance(errata_tuple, tuple):
+        raise EpubBlocksError("compiled errata must be a tuple")
+    errata_values: list[dict[str, object]] = []
+    for erratum in cast(tuple[object, ...], errata_tuple):
+        if not isinstance(erratum, Erratum):
+            raise EpubBlocksError("compiled errata contains an invalid erratum")
+        errata_values.append(
+            {
+                "id": erratum.block_id,
+                "find": erratum.find,
+                "replace": erratum.replacement,
+            }
+        )
+    if errata_values:
+        validated_errata = _errata(errata_values, "compiled errata", compiled.content)
+        for index, erratum in enumerate(validated_errata, 1):
+            if erratum.block_id not in seen_ids:
+                raise EpubBlocksError(
+                    f"compiled errata[{index}]: unknown block ID {erratum.block_id!r}"
+                )
+        value["errata"] = errata_values
     encoded = json.dumps(
         value,
         ensure_ascii=False,
@@ -2324,6 +2382,7 @@ def _compile_from_epub(
         reserved,
         spec.content,
         spec.xml_repairs,
+        spec.errata,
     )
     actual_digest = compiled_recipe_digest(compiled)
     if verify_digest and spec.output.compiled_sha256 != actual_digest:
@@ -2446,6 +2505,27 @@ def _extract_compiled_from_epub(
             attachments_after=block.milestones_after,
         )
         result.append(ExtractedBlock(block.block_id, block.block_type, text))
+    indices = {block.block_id: index for index, block in enumerate(compiled.blocks)}
+    for number, erratum in enumerate(compiled.errata, 1):
+        index = indices[erratum.block_id]
+        block = result[index]
+        location = f"{recipe_location}: errata[{number}] for {block.block_id!r}"
+        start = block.text.find(erratum.find)
+        if start == -1:
+            raise EpubBlocksError(f"{location}: find must match exactly once; found 0")
+        # Count overlapping occurrences too: "aa" in "aaa" is ambiguous.
+        if block.text.find(erratum.find, start + 1) != -1:
+            raise EpubBlocksError(
+                f"{location}: find must match exactly once; found multiple matches"
+            )
+        text = (
+            block.text[:start]
+            + erratum.replacement
+            + block.text[start + len(erratum.find) :]
+        )
+        if not text and not compiled.blocks[index].allow_empty:
+            raise EpubBlocksError(f"{location}: correction produced no text")
+        result[index] = replace(block, text=text)
     return result
 
 

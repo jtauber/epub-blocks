@@ -15,6 +15,21 @@
     "recipe_version": {
       "const": "1"
     },
+    "errata": {
+      "type": "array",
+      "default": [],
+      "description": "New in 0.10.0: ordered, exact-once literal replacements in generated plain-text blocks. Runtime rejects unknown IDs, no-op edits, invalid UTF-8 and use with retained markup.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "find", "replace"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "not": {"pattern": "[\\t\\r\\n]"}},
+          "find": {"type": "string", "minLength": 1, "not": {"pattern": "[\\t\\r\\n]"}},
+          "replace": {"type": "string", "not": {"pattern": "[\\t\\r\\n]"}}
+        }
+      }
+    },
     "xml_repairs": {
       "type": "array",
       "items": {

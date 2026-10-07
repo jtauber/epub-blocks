@@ -11,11 +11,11 @@ table.
 It requires Python 3.13 or later. The project is pre-1.0, so its public API and
 recipe format may still make breaking changes.
 
-Version **0.9.0** adds an optional, experimental terminal wizard for authoring
-recipes: select files, define references, classify patterns, preview output,
-and save your decisions. Existing recipes keep their extraction behavior and
-compiled digests, and recipe format remains `"1"`. Statement and branch test
-coverage remain at 100%. See the [changelog](CHANGELOG.md#090---2026-10-01).
+Version **0.10.0**, not yet published, adds native inline errata: explicit,
+block-scoped literal corrections after plain-text extraction. Existing recipes
+without errata keep their extraction behavior and compiled digests, and recipe
+format remains `"1"`. Statement and branch test coverage remain at 100%.
+See the [changelog](CHANGELOG.md#0100---unreleased).
 
 ## Installation
 
@@ -64,10 +64,15 @@ separately stored list of expected identifiers or types. Existing outputs may
 be useful as test oracles while authoring a recipe, but they are not recipe
 inputs and are not read by `epub-blocks`.
 
-The package does not compare editions, select preferred readings, apply
-editorial corrections, create witness manifests, or emit stand-off annotations.
+The package does not compare editions, select preferred readings, create
+witness manifests, or emit stand-off annotations.
 It can generate a marked-up TSV for a separate converter to derive plain text
-and stand-off together. Recipes describe source structure, not expected prose.
+and stand-off together.
+
+**New in 0.10.0 (unreleased):** recipes can also declare short, block-scoped literal
+[errata](docs/recipe-format.md#inline-errata-0100) for plain-text output.
+Each correction must match exactly once after extraction; the library never
+infers editorial choices. This extension is not in the published 0.9.0 package.
 
 ## Inspecting an EPUB
 
@@ -90,7 +95,7 @@ spine position, EPUB-internal document path, and element path within the XHTML
 
 ## Recipe example
 
-Recipe version 1 remains the serialized format in epub-blocks 0.9.0.
+Recipe version 1 remains the serialized format in epub-blocks 0.10.0.
 TSV serialization uses literal fields, instead of CSV-style quoting:
 
 ```json
