@@ -536,13 +536,15 @@ class RecipeWizard(App[None]):
                 if not task.cancelled():
                     task.exception()
 
-            # Shield the actual job from worker cancellation: a cancelled waiter
-            # does not stop its thread. Keep tracking it so retries cannot overlap.
+            # Cancelling this waiter must not cancel the thread's task. wait()
+            # preserves it without shield()'s Python 3.14 cancellation logging;
+            # finished() observes errors even after the UI waiter has gone away.
             self.validation_task = asyncio.create_task(
                 asyncio.to_thread(preview_recipe, self.inventory, state)
             )
             self.validation_task.add_done_callback(finished)
-            result = await asyncio.shield(self.validation_task)
+            await asyncio.wait((self.validation_task,))
+            result = self.validation_task.result()
             if self.state.to_json(self.inventory) != snapshot:
                 self.status("Decisions changed while validating. Refresh the preview.")
                 return

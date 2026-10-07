@@ -19,10 +19,12 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from rich.text import Text
 from test_epub_blocks import AUXILIARY, PACKAGE, make_epub
 from textual.widgets import (
     Button,
     Checkbox,
+    DataTable,
     Input,
     Select,
     SelectionList,
@@ -30,6 +32,7 @@ from textual.widgets import (
     TabbedContent,
     TextArea,
 )
+from textual.widgets.data_table import RowKey
 from textual.widgets.select import InvalidSelectValueError
 from textual.worker import WorkerCancelled
 
@@ -973,8 +976,13 @@ class WizardUITests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("test did not release validation")
             raise EpubBlocksError("failure after cancellation")
 
-        with patch(
-            "epub_blocks._wizard_tui.preview_recipe", side_effect=failing_preview
+        with (
+            patch(
+                "epub_blocks._wizard_tui.preview_recipe", side_effect=failing_preview
+            ),
+            patch.object(
+                asyncio.get_running_loop(), "call_exception_handler"
+            ) as handler,
         ):
             try:
                 async with self.app.run_test(size=(100, 40)) as pilot:
@@ -992,6 +1000,21 @@ class WizardUITests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(EpubBlocksError, "after cancellation"):
                 await asyncio.wait_for(task, 10)
             await asyncio.sleep(0)  # Completion callbacks must be safe after unmount.
+            handler.assert_not_called()
+
+    async def test_highlight_without_preview_or_row_key_is_ignored(self) -> None:
+        async with self.app.run_test(size=(100, 40)):
+            table = cast(DataTable[Text], self.app.query_one("#records", DataTable))
+            detail = self.app.query_one("#record-text", TextArea)
+            detail.load_text("Keep existing detail")
+            self.app.record_highlighted(DataTable.RowHighlighted(table, 0, RowKey("0")))
+            self.app.preview = ({}, [ExtractedBlock("001", "paragraph", "New detail")])
+            self.app.record_highlighted(
+                DataTable.RowHighlighted(table, 0, RowKey(None))
+            )
+            self.assertEqual(detail.text, "Keep existing detail")
+            self.app.record_highlighted(DataTable.RowHighlighted(table, 0, RowKey("0")))
+            self.assertEqual(detail.text, "New detail")
 
     async def test_cancelled_background_task_reenables_validation(self) -> None:
         started = asyncio.Event()

@@ -13,6 +13,8 @@ All notable changes to this project will be documented here. The project uses
   existing digests and behavior. Recipe version remains `"1"`.
 - Document the correction contract and add regression tests, retaining 100%
   statement and branch coverage.
+- Keep wizard validation errors observed after cancellation without duplicate
+  exception warnings on Python 3.14, and test empty highlight events explicitly.
 
 ## 0.9.0 - 2026-10-01
 
